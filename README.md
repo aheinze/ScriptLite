@@ -154,11 +154,18 @@ The same globals work with the transpiler. Pass the globals at both transpile ti
 ```php
 $globals = ['acc' => $acc, 'multiplier' => 2];
 
-$php = $engine->transpile($script, $globals);
-$result = $engine->evalTranspiled($php, $globals);
+// One-shot: transpile and execute in a single call
+$result = $engine->transpileAndEval($script, $globals);
 
-// Or for long-running workers (no eval memory leak):
-$result = $engine->runTranspiled($php, $globals);
+// Transpile once, run many times with different globals
+$callback = $engine->getTranspiledCallback($script, $globals);
+$result = $callback(['acc' => $acc1, 'multiplier' => 2]);
+$result = $callback(['acc' => $acc2, 'multiplier' => 3]);
+
+// Or step by step for full control:
+$php = $engine->transpile($script, $globals);
+$result = $engine->runTranspiled($php, $globals);    // temp file (worker-safe)
+$result = $engine->evalTranspiled($php, $globals);   // eval (leaks in long-running workers)
 
 // Or save to a file for OPcache:
 $engine->saveTranspiled($php, '/tmp/script.php');
