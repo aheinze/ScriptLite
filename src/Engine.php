@@ -90,6 +90,42 @@ final class Engine
     }
 
     /**
+     * Transpile JS source and return a closure for repeated execution.
+     *
+     * @param array<string, mixed> $globals Keys = variable names to register for transpilation
+     */
+    public function getTranspiledCallback(string $source, array $globals = []): \Closure
+    {
+        $phpSource = $this->transpile($source, $globals);
+        return function (array $runtimeGlobals = []) use ($phpSource) {
+            return $this->runTranspiled($phpSource, $runtimeGlobals);
+        };
+    }
+
+    /**
+     * Transpile and execute JS source in one call via eval().
+     *
+     * Convenience method that combines transpile() + evalTranspiled().
+     *
+     * @param array<string, mixed> $globals PHP values injected as JS globals
+     */
+    public function transpileAndEval(string $source, array $globals = [], array $opts = []): mixed
+    {
+
+        $opts = array_merge([
+            'use_eval' => false, // if false, uses runTranspiled() to avoid eval() memory leak
+        ], $opts);
+
+        $php = $this->transpile($source, $globals);
+
+        if ($opts['use_eval']) {
+            return $this->evalTranspiled($php, $globals);
+        }
+
+        return $this->runTranspiled($php, $globals);
+    }
+
+    /**
      * Execute transpiled PHP source via eval().
      *
      * Warning: leaks memory in long-running workers (FrankenPHP, Swoole, RoadRunner)
