@@ -8,10 +8,6 @@ Two execution backends:
 
 ## Quick start
 
-```bash
-composer install
-```
-
 ```php
 use ScriptLite\Engine;
 
