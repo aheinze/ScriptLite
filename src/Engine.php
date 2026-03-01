@@ -1,0 +1,181 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ScriptLite;
+
+use ScriptLite\Ast\Parser;
+use ScriptLite\Compiler\Compiler;
+use ScriptLite\Compiler\CompiledScript;
+use ScriptLite\Runtime\Environment;
+use ScriptLite\Transpiler\PhpTranspiler;
+use ScriptLite\Runtime\PhpObjectProxy;
+use ScriptLite\Vm\VirtualMachine;
+
+/**
+ * High-level facade for embedding the JS engine in PHP applications.
+ *
+ * Usage:
+ *   $engine = new Engine();
+ *   $result = $engine->eval('1 + 2');  // 3
+ *   echo $engine->getOutput();         // console.log output
+ *
+ * With globals:
+ *   $result = $engine->eval('name + " is " + age', [
+ *       'name' => 'Alice',
+ *       'age' => 30,
+ *   ]);
+ *
+ * For repeated execution of the same script, compile once and run many:
+ *   $compiled = $engine->compile('function greet(n) { return "hi " + n; }; greet(name);');
+ *   $result = $engine->run($compiled, ['name' => 'Alice']);
+ */
+final class Engine
+{
+    private ?VirtualMachine $lastVm = null;
+
+    /**
+     * Parse and compile JS source to bytecode.
+     */
+    public function compile(string $source): CompiledScript
+    {
+        $parser   = new Parser($source);
+        $program  = $parser->parse();
+        $compiler = new Compiler();
+        return $compiler->compile($program);
+    }
+
+    /**
+     * Execute a compiled script.
+     *
+     * @param array<string, mixed> $globals PHP values injected as JS globals
+     */
+    public function run(CompiledScript $script, array $globals = []): mixed
+    {
+        $vm = new VirtualMachine();
+        $env = null;
+        if (!empty($globals)) {
+            $env = $vm->createGlobalEnvironmentWithVars($globals);
+        }
+        $result = $vm->execute($script, $env);
+        $this->lastVm = $vm;
+        return VirtualMachine::toPhp($result);
+    }
+
+    /**
+     * Compile and execute JS source in one call.
+     *
+     * @param array<string, mixed> $globals PHP values injected as JS globals
+     */
+    public function eval(string $source, array $globals = []): mixed
+    {
+        return $this->run($this->compile($source), $globals);
+    }
+
+    /**
+     * Transpile JS source to PHP source code.
+     *
+     * Pass globals to register their names in the scope tracker so inner
+     * closures capture them correctly. Only the keys matter at transpile time;
+     * actual values are provided at execution time.
+     *
+     * @param array<string, mixed> $globals Keys = variable names to register
+     */
+    public function transpile(string $source, array $globals = []): string
+    {
+        $parser  = new Parser($source);
+        $program = $parser->parse();
+        $transpiler = new PhpTranspiler();
+        return $transpiler->transpile($program, array_keys($globals));
+    }
+
+    /**
+     * Execute transpiled PHP source via eval().
+     *
+     * Warning: leaks memory in long-running workers (FrankenPHP, Swoole, RoadRunner)
+     * because eval'd code is never freed by OPcache. Use runTranspiled() instead.
+     *
+     * @param array<string, mixed> $globals PHP values available as JS globals
+     */
+    public function evalTranspiled(string $phpSource, array $globals = []): mixed
+    {
+        $__globals = self::normalizeGlobals($globals);
+        return eval($phpSource);
+    }
+
+    /**
+     * Execute transpiled PHP source via a temporary file.
+     *
+     * Writes the PHP source to a temp file, includes it, and deletes it.
+     * Safe for long-running workers — no eval() memory leak.
+     *
+     * @param array<string, mixed> $globals PHP values available as JS globals
+     */
+    public function runTranspiled(string $phpSource, array $globals = []): mixed
+    {
+        $file = tempnam(sys_get_temp_dir(), 'scriptlite_') . '.php';
+        file_put_contents($file, "<?php\n" . $phpSource);
+        try {
+            $__globals = self::normalizeGlobals($globals);
+            return include $file;
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    /**
+     * Save transpiled PHP source to a file for repeated inclusion.
+     *
+     * The file can be require'd directly and benefits from OPcache.
+     * Set $__globals before including to inject variables:
+     *
+     *   $__globals = ['name' => 'Alice'];
+     *   $result = include '/path/to/script.php';
+     */
+    public function saveTranspiled(string $phpSource, string $path): string
+    {
+        file_put_contents($path, "<?php\n" . $phpSource);
+        if (function_exists('opcache_compile_file')) {
+            @opcache_compile_file($path);
+        }
+        return $path;
+    }
+
+    /**
+     * Get console output from the last execution.
+     */
+    public function getOutput(): string
+    {
+        return $this->lastVm?->getOutput() ?? '';
+    }
+
+    /**
+     * Recursively convert PHP objects to associative arrays for the transpiler path.
+     *
+     * The transpiler emits $obj['key'] for JS property access, so PHP objects
+     * must be converted to arrays. Closures are preserved as-is.
+     */
+    private static function normalizeGlobals(array $globals): array
+    {
+        foreach ($globals as $k => $v) {
+            $globals[$k] = self::normalizeValue($v);
+        }
+        return $globals;
+    }
+
+    private static function normalizeValue(mixed $value): mixed
+    {
+        if ($value instanceof \Closure) {
+            return $value;
+        }
+        if (is_object($value)) {
+            return new PhpObjectProxy($value);
+        }
+        if (is_array($value)) {
+            foreach ($value as $k => $v) {
+                $value[$k] = self::normalizeValue($v);
+            }
+        }
+        return $value;
+    }
+}

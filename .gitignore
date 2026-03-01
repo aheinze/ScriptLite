@@ -1,0 +1,37 @@
+# Dependencies
+vendor/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Composer
+composer.phar
+
+# PHPUnit
+.phpunit.result.cache
+.phpunit.cache/
+
+# Coverage reports
+/coverage/
+clover.xml
+coverage.xml
+
+# Build artifacts
+/build/
+/dist/
+
+# Logs
+*.log
