@@ -32,6 +32,9 @@ final class PhpTranspiler
 
     private bool $inConstructor = false;
 
+    /** @var array<string, TypeHint> tracked variable types for optimization */
+    private array $varTypes = [];
+
     /**
      * Transpile a parsed JS program to executable PHP source.
      * The returned string can be eval()'d or written to a file and include()'d.
@@ -43,6 +46,7 @@ final class PhpTranspiler
     {
         $this->scopes = [];
         $this->tmpId = 0;
+        $this->varTypes = [];
 
         $this->pushScope([]);
         foreach ($globalNames as $name) {
@@ -109,7 +113,12 @@ final class PhpTranspiler
     private function emitVarDecl(VarDeclaration $d): string
     {
         $this->addVar($d->name);
-        $val = $d->initializer !== null ? $this->emitExpr($d->initializer) : 'null';
+        if ($d->initializer !== null) {
+            $this->trackVar($d->name, $this->inferType($d->initializer));
+            $val = $this->emitExpr($d->initializer);
+        } else {
+            $val = 'null';
+        }
         return '$' . $d->name . ' = ' . $val . ";\n";
     }
 
@@ -131,22 +140,35 @@ final class PhpTranspiler
 
     private function emitIf(IfStmt $s): string
     {
+        $saved = $this->varTypes;
         $out = 'if (' . $this->emitExpr($s->condition) . ") {\n";
         $out .= $this->indent($this->emitStmt($s->consequent));
         $out .= '}';
+        $afterThen = $this->varTypes;
+
         if ($s->alternate !== null) {
+            $this->varTypes = $saved;
             $out .= " else {\n";
             $out .= $this->indent($this->emitStmt($s->alternate));
             $out .= '}';
+            $afterElse = $this->varTypes;
+            // Keep only types that both branches agree on
+            $this->varTypes = $this->mergeBranchTypes($afterThen, $afterElse);
+        } else {
+            // Body may or may not execute — merge with pre-branch state
+            $this->varTypes = $this->mergeBranchTypes($saved, $afterThen);
         }
         return $out . "\n";
     }
 
     private function emitWhile(WhileStmt $s): string
     {
-        return "while (" . $this->emitExpr($s->condition) . ") {\n"
+        $saved = $this->varTypes;
+        $out = "while (" . $this->emitExpr($s->condition) . ") {\n"
             . $this->indent($this->emitStmt($s->body))
             . "}\n";
+        $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
+        return $out;
     }
 
     private function emitFor(ForStmt $s): string
@@ -154,6 +176,9 @@ final class PhpTranspiler
         $init = '';
         if ($s->init instanceof VarDeclaration) {
             $this->addVar($s->init->name);
+            if ($s->init->initializer !== null) {
+                $this->trackVar($s->init->name, $this->inferType($s->init->initializer));
+            }
             $val = $s->init->initializer !== null ? $this->emitExpr($s->init->initializer) : 'null';
             $init = '$' . $s->init->name . ' = ' . $val;
         } elseif ($s->init instanceof ExpressionStmt) {
@@ -163,16 +188,23 @@ final class PhpTranspiler
         $cond = $s->condition !== null ? $this->emitExpr($s->condition) : '';
         $upd = $s->update !== null ? $this->emitExpr($s->update) : '';
 
-        return "for ({$init}; {$cond}; {$upd}) {\n"
+        $saved = $this->varTypes;
+        $out = "for ({$init}; {$cond}; {$upd}) {\n"
             . $this->indent($this->emitStmt($s->body))
             . "}\n";
+        $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
+        return $out;
     }
 
     private function emitDoWhile(DoWhileStmt $s): string
     {
-        return "do {\n"
+        $saved = $this->varTypes;
+        $out = "do {\n"
             . $this->indent($this->emitStmt($s->body))
             . "} while (" . $this->emitExpr($s->condition) . ");\n";
+        // After first iteration types may change on subsequent iterations
+        $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
+        return $out;
     }
 
     private function emitSwitch(SwitchStmt $s): string
@@ -181,7 +213,10 @@ final class PhpTranspiler
         $disc = '$__sw' . ($this->tmpId++);
         $out = "{$disc} = " . $this->emitExpr($s->discriminant) . ";\n";
         $out .= "switch (true) {\n";
+        $saved = $this->varTypes;
+        $merged = $saved;
         foreach ($s->cases as $case) {
+            $this->varTypes = $saved;
             if ($case->test !== null) {
                 $out .= "case ({$disc} === " . $this->emitExpr($case->test) . "):\n";
             } else {
@@ -190,7 +225,9 @@ final class PhpTranspiler
             foreach ($case->consequent as $stmt) {
                 $out .= $this->indent($this->emitStmt($stmt));
             }
+            $merged = $this->mergeBranchTypes($merged, $this->varTypes);
         }
+        $this->varTypes = $merged;
         $out .= "}\n";
         return $out;
     }
@@ -202,8 +239,11 @@ final class PhpTranspiler
 
     private function emitTryCatch(TryCatchStmt $s): string
     {
+        $saved = $this->varTypes;
         $out = "try {\n" . $this->indent($this->emitBlock($s->block)) . "}";
+        $afterTry = $this->varTypes;
         if ($s->handler !== null) {
+            $this->varTypes = $saved;
             $this->addVar($s->handler->param);
             $out .= " catch (\\Throwable \$__ex) {\n";
             $out .= $this->indent(
@@ -211,6 +251,9 @@ final class PhpTranspiler
                 . $this->emitBlock($s->handler->body)
             );
             $out .= "}\n";
+            $this->varTypes = $this->mergeBranchTypes($afterTry, $this->varTypes);
+        } else {
+            $this->varTypes = $this->mergeBranchTypes($saved, $afterTry);
         }
         return $out;
     }
@@ -272,13 +315,30 @@ final class PhpTranspiler
 
         if ($e->operator === '+') {
             // JS + : string concat if either operand is string, else numeric
-            if ($e->left instanceof StringLiteral || $e->right instanceof StringLiteral
-                || $e->left instanceof TemplateLiteral || $e->right instanceof TemplateLiteral) {
-                return '((string)(' . $l . ') . (string)(' . $r . '))';
-            }
-            if ($e->left instanceof NumberLiteral && $e->right instanceof NumberLiteral) {
+            $leftType  = $this->inferType($e->left);
+            $rightType = $this->inferType($e->right);
+
+            // Fast path: both provably numeric → native PHP +
+            if ($leftType === TypeHint::Numeric && $rightType === TypeHint::Numeric) {
                 return '(' . $l . ' + ' . $r . ')';
             }
+
+            // Fast path: either provably string → string concat
+            if ($leftType === TypeHint::String || $rightType === TypeHint::String) {
+                return '((string)(' . $l . ') . (string)(' . $r . '))';
+            }
+
+            // Half-guard: one side numeric, only check the other
+            if ($leftType === TypeHint::Numeric) {
+                $tb = '$__t' . $this->tmpId++;
+                return "(is_string({$tb} = ({$r})) ? (string)({$l}) . {$tb} : ({$l}) + {$tb})";
+            }
+            if ($rightType === TypeHint::Numeric) {
+                $ta = '$__t' . $this->tmpId++;
+                return "(is_string({$ta} = ({$l})) ? {$ta} . (string)({$r}) : {$ta} + ({$r}))";
+            }
+
+            // Slow path: full guard (both sides unknown)
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
             return "(is_string({$ta} = ({$l})) | is_string({$tb} = ({$r})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb})";
@@ -355,9 +415,20 @@ final class PhpTranspiler
         $this->addVar($e->name);
         $val = $this->emitExpr($e->value);
         if ($e->operator === '=') {
+            $this->trackVar($e->name, $this->inferType($e->value));
             return '($' . $e->name . ' = ' . $val . ')';
         }
         if ($e->operator === '+=') {
+            $lhsType = $this->inferFromName($e->name);
+            $rhsType = $this->inferType($e->value);
+            // Fast path: both provably numeric
+            if ($lhsType === TypeHint::Numeric && $rhsType === TypeHint::Numeric) {
+                return '($' . $e->name . ' += ' . $val . ')';
+            }
+            // Fast path: lhs is string
+            if ($lhsType === TypeHint::String) {
+                return '($' . $e->name . ' .= (string)(' . $val . '))';
+            }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
             return '($' . $e->name . " = (is_string({$ta} = \${$e->name}) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
@@ -386,25 +457,45 @@ final class PhpTranspiler
 
     private function emitLogical(LogicalExpr $e): string
     {
+        $tmp = '$__nc' . ($this->tmpId++);
+        $left = $this->emitExpr($e->left);
+        $right = $this->emitExpr($e->right);
         if ($e->operator === '??') {
-            // PHP ?? only works on variables; use temp var for arbitrary expressions
-            $tmp = '$__nc' . ($this->tmpId++);
-            return "(({$tmp} = " . $this->emitExpr($e->left) . ") === null ? " . $this->emitExpr($e->right) . " : {$tmp})";
+            // Nullish coalescing: return right if left is null
+            return "(({$tmp} = {$left}) === null ? {$right} : {$tmp})";
         }
-        return '(' . $this->emitExpr($e->left) . ' ' . $e->operator . ' ' . $this->emitExpr($e->right) . ')';
+        if ($e->operator === '||') {
+            // JS || returns the first truthy operand (not a boolean)
+            return "(({$tmp} = {$left}) ? {$tmp} : {$right})";
+        }
+        if ($e->operator === '&&') {
+            // JS && returns the first falsy operand, or the last if all truthy
+            return "(({$tmp} = {$left}) ? {$right} : {$tmp})";
+        }
+        return "({$left} {$e->operator} {$right})";
     }
 
     private function emitTypeof(TypeofExpr $e): string
     {
-        $v = $this->emitExpr($e->operand);
-        return "(function(\$v) { "
-            . "if (\$v === null) return 'object'; "
-            . "if (is_bool(\$v)) return 'boolean'; "
-            . "if (is_int(\$v) || is_float(\$v)) return 'number'; "
-            . "if (is_string(\$v)) return 'string'; "
-            . "if (\$v instanceof \\Closure) return 'function'; "
-            . "return 'object'; "
-            . "})({$v})";
+        // Fast path: known types at compile time
+        if ($e->operand instanceof UndefinedLiteral) return "'undefined'";
+        if ($e->operand instanceof NullLiteral) return "'object'";
+        if ($e->operand instanceof ArrayLiteral || $e->operand instanceof ObjectLiteral) return "'object'";
+        $hint = $this->inferType($e->operand);
+        if ($hint === TypeHint::Numeric) return "'number'";
+        if ($hint === TypeHint::String) return "'string'";
+        if ($hint === TypeHint::Bool) return "'boolean'";
+        if ($hint === TypeHint::Array_) return "'object'";
+
+        $v = '$__typeof' . ($this->tmpId++);
+        $expr = $this->emitExpr($e->operand);
+        // null represents both JS null and undefined at runtime — default to 'object'
+        // (typeof null === 'object' in JS; undefined literals are handled above)
+        return "(({$v} = {$expr}) === null ? 'object' "
+            . ": (is_bool({$v}) ? 'boolean' "
+            . ": (is_int({$v}) || is_float({$v}) ? 'number' "
+            . ": (is_string({$v}) ? 'string' "
+            . ": ({$v} instanceof \\Closure ? 'function' : 'object')))))";
     }
 
     private function emitArray(ArrayLiteral $e): string
@@ -478,6 +569,13 @@ final class PhpTranspiler
 
             // .length → count() for arrays, strlen() for strings
             if ($name === 'length') {
+                $objType = $this->inferType($e->object);
+                if ($objType === TypeHint::Array_) {
+                    return "count({$obj})";
+                }
+                if ($objType === TypeHint::String) {
+                    return "strlen({$obj})";
+                }
                 return "(is_string({$obj}) ? strlen({$obj}) : count({$obj}))";
             }
 
@@ -506,6 +604,12 @@ final class PhpTranspiler
 
         // Compound assignment: obj[key] += val
         if ($e->operator === '+=') {
+            $rhsType = $this->inferType($e->value);
+            // Fast path: rhs is provably numeric (and obj[key] is used in numeric context)
+            if ($rhsType === TypeHint::Numeric) {
+                $ta = '$__t' . $this->tmpId++;
+                return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) ? {$ta} . (string)({$val}) : {$ta} + ({$val})))";
+            }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
             return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
@@ -808,10 +912,15 @@ final class PhpTranspiler
             $this->addVar($name);
         }
 
-        // Captured variables from parent scopes
-        $captured = $this->getCapturedVars();
-        // Also capture the function's own name for recursion
-        if ($name !== null && !in_array($name, $captured)) {
+        // Narrowed capture: only capture parent-scope vars actually referenced in body
+        $parentVars = $this->getCapturedVars();
+        $localNames = array_merge($allParams, $hoisted);
+        // NOTE: Don't add $name to localNames — if the body references it
+        // for recursion, it must be detected as a free variable and captured.
+        $freeInBody = $this->collectReferencedNames($body, $localNames);
+        $captured = array_values(array_intersect($freeInBody, $parentVars));
+        // Also capture the function's own name for recursion (if referenced)
+        if ($name !== null && in_array($name, $freeInBody) && !in_array($name, $captured)) {
             $captured[] = $name;
         }
 
@@ -828,6 +937,9 @@ final class PhpTranspiler
 
         $prevConstructor = $this->inConstructor;
         $this->inConstructor = $isConstructor;
+
+        // Save and restore varTypes around closure body emission
+        $savedVarTypes = $this->varTypes;
 
         $innerCode = '';
         if ($isConstructor) {
@@ -850,6 +962,7 @@ final class PhpTranspiler
             $innerCode .= "return \$__this;\n";
         }
 
+        $this->varTypes = $savedVarTypes;
         $this->inConstructor = $prevConstructor;
         $this->popScope();
 
@@ -988,5 +1101,346 @@ final class PhpTranspiler
     {
         $lines = explode("\n", rtrim($code, "\n"));
         return implode("\n", array_map(fn($l) => $l === '' ? '' : '    ' . $l, $lines)) . "\n";
+    }
+
+    // ───────────────── Type Inference ─────────────────
+
+    /**
+     * Merge two branch type snapshots: keep a type only if both branches agree.
+     * Variables that differ between branches become Unknown (removed from map).
+     */
+    private function mergeBranchTypes(array $before, array $branch): array
+    {
+        $result = [];
+        foreach ($before as $name => $type) {
+            if (isset($branch[$name]) && $branch[$name] === $type) {
+                $result[$name] = $type;
+            }
+        }
+        // Also keep types introduced in branch if not conflicting
+        foreach ($branch as $name => $type) {
+            if (!isset($before[$name]) && !isset($result[$name])) {
+                // New variable introduced in branch — keep it
+                $result[$name] = $type;
+            }
+        }
+        return $result;
+    }
+
+    private function trackVar(string $name, TypeHint $type): void
+    {
+        if ($type !== TypeHint::Unknown) {
+            $this->varTypes[$name] = $type;
+        } else {
+            unset($this->varTypes[$name]);
+        }
+    }
+
+    private function inferFromName(string $name): TypeHint
+    {
+        return $this->varTypes[$name] ?? TypeHint::Unknown;
+    }
+
+    private function inferType(Expr $e): TypeHint
+    {
+        return match (true) {
+            $e instanceof NumberLiteral => TypeHint::Numeric,
+            $e instanceof StringLiteral,
+            $e instanceof TemplateLiteral => TypeHint::String,
+            $e instanceof BooleanLiteral => TypeHint::Bool,
+            $e instanceof ArrayLiteral => TypeHint::Array_,
+
+            // Arithmetic always produces numeric
+            $e instanceof BinaryExpr && in_array($e->operator, ['-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>'], true)
+                => TypeHint::Numeric,
+
+            // + with two known-numerics → numeric
+            $e instanceof BinaryExpr && $e->operator === '+'
+                && $this->inferType($e->left) === TypeHint::Numeric
+                && $this->inferType($e->right) === TypeHint::Numeric
+                => TypeHint::Numeric,
+
+            // + with a known string → string
+            $e instanceof BinaryExpr && $e->operator === '+'
+                && ($this->inferType($e->left) === TypeHint::String || $this->inferType($e->right) === TypeHint::String)
+                => TypeHint::String,
+
+            // Comparison operators → bool
+            $e instanceof BinaryExpr && in_array($e->operator, ['==', '!=', '===', '!==', '<', '<=', '>', '>=', 'in', 'instanceof'], true)
+                => TypeHint::Bool,
+
+            // Unary operators
+            $e instanceof UnaryExpr && $e->operator === '-' => TypeHint::Numeric,
+            $e instanceof UnaryExpr && $e->operator === '~' => TypeHint::Numeric,
+            $e instanceof UnaryExpr && $e->operator === '!' => TypeHint::Bool,
+
+            // Update (++/--) → numeric
+            $e instanceof UpdateExpr => TypeHint::Numeric,
+
+            // Assignment inherits type from value
+            $e instanceof AssignExpr && $e->operator === '=' => $this->inferType($e->value),
+
+            // Compound numeric assignments
+            $e instanceof AssignExpr && in_array($e->operator, ['-=', '*=', '/=', '%=', '**=', '&=', '|=', '^=', '<<=', '>>=', '>>>='], true)
+                => TypeHint::Numeric,
+
+            // += where both sides are numeric → numeric
+            $e instanceof AssignExpr && $e->operator === '+='
+                && $this->inferFromName($e->name) === TypeHint::Numeric
+                && $this->inferType($e->value) === TypeHint::Numeric
+                => TypeHint::Numeric,
+
+            // Method calls with known return types
+            $e instanceof CallExpr && $e->callee instanceof MemberExpr
+                && !$e->callee->computed
+                && $e->callee->property instanceof Identifier
+                => $this->inferMethodReturnType($e->callee),
+
+            // .length → always numeric
+            $e instanceof MemberExpr && !$e->computed
+                && $e->property instanceof Identifier && $e->property->name === 'length'
+                => TypeHint::Numeric,
+
+            // Identifiers: check tracked type
+            $e instanceof Identifier => $this->inferFromName($e->name),
+
+            // Logical operators inherit from their branches
+            $e instanceof LogicalExpr && $e->operator === '||' => $this->inferLogicalType($e),
+            $e instanceof LogicalExpr && $e->operator === '&&' => $this->inferLogicalType($e),
+
+            // Conditional: if both branches agree, use that type
+            $e instanceof ConditionalExpr => $this->inferConditionalType($e),
+
+            default => TypeHint::Unknown,
+        };
+    }
+
+    private function inferMethodReturnType(MemberExpr $callee): TypeHint
+    {
+        $method = $callee->property->name;
+
+        // Math.* → numeric
+        if ($callee->object instanceof Identifier && $callee->object->name === 'Math') {
+            return TypeHint::Numeric;
+        }
+
+        return match ($method) {
+            // Array methods returning arrays
+            'filter', 'map', 'concat', 'reverse', 'flat', 'splice', 'sort', 'slice'
+                => TypeHint::Array_,
+            // Methods returning numeric
+            'indexOf', 'findIndex', 'search', 'push', 'unshift'
+                => TypeHint::Numeric,
+            // Methods returning string
+            'join', 'toUpperCase', 'toLowerCase', 'trim', 'trimStart', 'trimEnd',
+            'charAt', 'substring', 'repeat', 'replace'
+                => TypeHint::String,
+            // Methods returning bool
+            'includes', 'startsWith', 'endsWith', 'every', 'some', 'hasOwnProperty'
+                => TypeHint::Bool,
+            default => TypeHint::Unknown,
+        };
+    }
+
+    private function inferLogicalType(LogicalExpr $e): TypeHint
+    {
+        $left = $this->inferType($e->left);
+        $right = $this->inferType($e->right);
+        return ($left === $right) ? $left : TypeHint::Unknown;
+    }
+
+    private function inferConditionalType(ConditionalExpr $e): TypeHint
+    {
+        $cons = $this->inferType($e->consequent);
+        $alt = $this->inferType($e->alternate);
+        return ($cons === $alt) ? $cons : TypeHint::Unknown;
+    }
+
+    // ───────────────── Free Variable Collection ─────────────────
+
+    /**
+     * Collect all Identifier names referenced in a function body,
+     * excluding names declared locally (params, var/function decls).
+     * Does NOT descend into nested function bodies.
+     */
+    private function collectReferencedNames(array $body, array $localNames): array
+    {
+        $referenced = [];
+        $declared = array_flip($localNames);
+        foreach ($body as $stmt) {
+            $this->walkStmtForNames($stmt, $referenced, $declared);
+        }
+        return array_keys($referenced);
+    }
+
+    private function walkStmtForNames(Stmt $s, array &$referenced, array &$declared): void
+    {
+        if ($s instanceof ExpressionStmt) {
+            $this->walkExprForNames($s->expression, $referenced, $declared);
+        } elseif ($s instanceof VarDeclaration) {
+            $declared[$s->name] = true;
+            if ($s->initializer !== null) {
+                $this->walkExprForNames($s->initializer, $referenced, $declared);
+            }
+        } elseif ($s instanceof ReturnStmt) {
+            if ($s->value !== null) {
+                $this->walkExprForNames($s->value, $referenced, $declared);
+            }
+        } elseif ($s instanceof IfStmt) {
+            $this->walkExprForNames($s->condition, $referenced, $declared);
+            $this->walkStmtForNames($s->consequent, $referenced, $declared);
+            if ($s->alternate !== null) {
+                $this->walkStmtForNames($s->alternate, $referenced, $declared);
+            }
+        } elseif ($s instanceof WhileStmt) {
+            $this->walkExprForNames($s->condition, $referenced, $declared);
+            $this->walkStmtForNames($s->body, $referenced, $declared);
+        } elseif ($s instanceof ForStmt) {
+            if ($s->init instanceof VarDeclaration) {
+                $declared[$s->init->name] = true;
+                if ($s->init->initializer !== null) {
+                    $this->walkExprForNames($s->init->initializer, $referenced, $declared);
+                }
+            } elseif ($s->init instanceof ExpressionStmt) {
+                $this->walkExprForNames($s->init->expression, $referenced, $declared);
+            }
+            if ($s->condition !== null) {
+                $this->walkExprForNames($s->condition, $referenced, $declared);
+            }
+            if ($s->update !== null) {
+                $this->walkExprForNames($s->update, $referenced, $declared);
+            }
+            $this->walkStmtForNames($s->body, $referenced, $declared);
+        } elseif ($s instanceof DoWhileStmt) {
+            $this->walkStmtForNames($s->body, $referenced, $declared);
+            $this->walkExprForNames($s->condition, $referenced, $declared);
+        } elseif ($s instanceof BlockStmt) {
+            foreach ($s->statements as $st) {
+                $this->walkStmtForNames($st, $referenced, $declared);
+            }
+        } elseif ($s instanceof SwitchStmt) {
+            $this->walkExprForNames($s->discriminant, $referenced, $declared);
+            foreach ($s->cases as $c) {
+                if ($c->test !== null) {
+                    $this->walkExprForNames($c->test, $referenced, $declared);
+                }
+                foreach ($c->consequent as $st) {
+                    $this->walkStmtForNames($st, $referenced, $declared);
+                }
+            }
+        } elseif ($s instanceof ThrowStmt) {
+            $this->walkExprForNames($s->argument, $referenced, $declared);
+        } elseif ($s instanceof TryCatchStmt) {
+            foreach ($s->block->statements as $st) {
+                $this->walkStmtForNames($st, $referenced, $declared);
+            }
+            if ($s->handler !== null) {
+                $declared[$s->handler->param] = true;
+                foreach ($s->handler->body->statements as $st) {
+                    $this->walkStmtForNames($st, $referenced, $declared);
+                }
+            }
+        } elseif ($s instanceof FunctionDeclaration) {
+            $declared[$s->name] = true;
+            // Descend into body to find free variables that must propagate
+            $innerDeclared = $declared;
+            foreach ($s->params as $p) {
+                $innerDeclared[$p] = true;
+            }
+            if ($s->restParam !== null) {
+                $innerDeclared[$s->restParam] = true;
+            }
+            foreach ($this->collectVarDecls($s->body) as $v) {
+                $innerDeclared[$v] = true;
+            }
+            foreach ($s->body as $st) {
+                $this->walkStmtForNames($st, $referenced, $innerDeclared);
+            }
+        }
+    }
+
+    private function walkExprForNames(Expr $e, array &$referenced, array &$declared): void
+    {
+        if ($e instanceof Identifier) {
+            if (!isset($declared[$e->name])) {
+                $referenced[$e->name] = true;
+            }
+        } elseif ($e instanceof FunctionExpr) {
+            // Descend into nested function bodies to find free variables
+            // that must propagate through this scope. Treat the inner
+            // function's params + var-decls as its own locals.
+            $innerDeclared = $declared;
+            foreach ($e->params as $p) {
+                $innerDeclared[$p] = true;
+            }
+            if ($e->restParam !== null) {
+                $innerDeclared[$e->restParam] = true;
+            }
+            if ($e->name !== null) {
+                $innerDeclared[$e->name] = true;
+            }
+            foreach ($this->collectVarDecls($e->body) as $v) {
+                $innerDeclared[$v] = true;
+            }
+            foreach ($e->body as $st) {
+                $this->walkStmtForNames($st, $referenced, $innerDeclared);
+            }
+        } elseif ($e instanceof BinaryExpr || $e instanceof LogicalExpr) {
+            $this->walkExprForNames($e->left, $referenced, $declared);
+            $this->walkExprForNames($e->right, $referenced, $declared);
+        } elseif ($e instanceof AssignExpr) {
+            if (!isset($declared[$e->name])) {
+                $referenced[$e->name] = true;
+            }
+            $this->walkExprForNames($e->value, $referenced, $declared);
+        } elseif ($e instanceof UnaryExpr) {
+            $this->walkExprForNames($e->operand, $referenced, $declared);
+        } elseif ($e instanceof TypeofExpr) {
+            $this->walkExprForNames($e->operand, $referenced, $declared);
+        } elseif ($e instanceof VoidExpr) {
+            $this->walkExprForNames($e->operand, $referenced, $declared);
+        } elseif ($e instanceof DeleteExpr) {
+            $this->walkExprForNames($e->operand, $referenced, $declared);
+        } elseif ($e instanceof UpdateExpr) {
+            $this->walkExprForNames($e->argument, $referenced, $declared);
+        } elseif ($e instanceof CallExpr) {
+            $this->walkExprForNames($e->callee, $referenced, $declared);
+            foreach ($e->arguments as $a) {
+                $this->walkExprForNames($a instanceof SpreadElement ? $a->argument : $a, $referenced, $declared);
+            }
+        } elseif ($e instanceof NewExpr) {
+            $this->walkExprForNames($e->callee, $referenced, $declared);
+            foreach ($e->arguments as $a) {
+                $this->walkExprForNames($a instanceof SpreadElement ? $a->argument : $a, $referenced, $declared);
+            }
+        } elseif ($e instanceof MemberExpr) {
+            $this->walkExprForNames($e->object, $referenced, $declared);
+            if ($e->computed) {
+                $this->walkExprForNames($e->property, $referenced, $declared);
+            }
+        } elseif ($e instanceof MemberAssignExpr) {
+            $this->walkExprForNames($e->object, $referenced, $declared);
+            if ($e->computed) {
+                $this->walkExprForNames($e->property, $referenced, $declared);
+            }
+            $this->walkExprForNames($e->value, $referenced, $declared);
+        } elseif ($e instanceof ConditionalExpr) {
+            $this->walkExprForNames($e->condition, $referenced, $declared);
+            $this->walkExprForNames($e->consequent, $referenced, $declared);
+            $this->walkExprForNames($e->alternate, $referenced, $declared);
+        } elseif ($e instanceof ArrayLiteral) {
+            foreach ($e->elements as $el) {
+                $this->walkExprForNames($el instanceof SpreadElement ? $el->argument : $el, $referenced, $declared);
+            }
+        } elseif ($e instanceof ObjectLiteral) {
+            foreach ($e->properties as $p) {
+                $this->walkExprForNames($p->value, $referenced, $declared);
+            }
+        } elseif ($e instanceof TemplateLiteral) {
+            foreach ($e->expressions as $ex) {
+                $this->walkExprForNames($ex, $referenced, $declared);
+            }
+        }
+        // Literals (Number, String, Boolean, Null, Undefined, Regex, This) — no references
     }
 }

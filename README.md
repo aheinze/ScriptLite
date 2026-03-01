@@ -4,7 +4,7 @@ An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subs
 
 Two execution backends:
 - **Bytecode VM** — a stack-based virtual machine with 55 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~36x faster than the VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~64x faster than the VM)
 
 ## Quick start
 
@@ -187,7 +187,7 @@ ECMAScript source
 | `src/Compiler/` | Single-pass AST → bytecode compiler |
 | `src/Vm/` | Stack-based bytecode VM |
 | `src/Runtime/` | Runtime objects (JsArray, JsObject, JsClosure, JsRegex, JsDate, Environment) |
-| `src/Transpiler/` | AST → PHP source code transpiler |
+| `src/Transpiler/` | AST → PHP source code transpiler with type inference |
 
 ### VM opcodes
 
@@ -222,11 +222,10 @@ Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort,
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~76 ms | ~98x |
-| Transpiled PHP (eval'd) | ~2 ms | ~2.7x |
-| Native PHP (hand-written) | ~0.8 ms | 1x |
+| VM (bytecode interpreter) | ~72 ms | ~100x |
+| Transpiled PHP (eval'd) | ~1.1 ms | ~1.6x |
+| Native PHP (hand-written) | ~0.7 ms | 1x |
 
-The register file optimization reduces VM variable access overhead by ~13x. The transpiler closes the gap further to 2.7x by letting OPcache/JIT compile the generated PHP natively.
 
 ## License
 
