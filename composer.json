@@ -1,7 +1,7 @@
 {
     "name": "aheinze/scriptlite",
     "version": "0.1.0",
-    "description": "An ECMAScript (ES5/ES6 subset) bytecode-compiled interpreter written in PHP 8.3+",
+    "description": "An ECMAScript (ES5/ES6 subset) bytecode-compiled interpreter",
     "type": "library",
     "license": "MIT",
     "require": {
