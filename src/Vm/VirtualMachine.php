@@ -408,6 +408,31 @@ final class VirtualMachine
                 $regs = &$frame->registers;
                 break;
 
+            case OpCode::CallOpt:
+                $argCount = $opA[$ci];
+                $calleeIdx = $sp - $argCount - 1;
+                $callee = $stack[$calleeIdx];
+                if ($callee === null || $callee === JsUndefined::Value) {
+                    $sp = $calleeIdx;
+                    $stack[$sp++] = JsUndefined::Value;
+                    break;
+                }
+                $this->sp = $sp;
+                $frame->ip = $ip;
+                $frame->env = $env;
+                $this->call($argCount);
+                $frame = $this->frame;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
+                $constants = $frame->constants;
+                $names = $frame->names;
+                $env = $frame->env;
+                $ip = $frame->ip;
+                $sp = $this->sp;
+                $regs = &$frame->registers;
+                break;
+
             case OpCode::New:
                 $this->sp = $sp;
                 $frame->ip = $ip;
@@ -428,6 +453,36 @@ final class VirtualMachine
             case OpCode::CallSpread:
                 $argsArray = $stack[--$sp];
                 $callee = $stack[--$sp];
+                $this->sp = $sp;
+                $frame->ip = $ip;
+                $frame->env = $env;
+                if ($callee instanceof JsClosure) {
+                    $this->callClosure($callee, $argsArray->elements);
+                } elseif ($callee instanceof NativeFunction) {
+                    $result = ($callee->callable)(...$argsArray->elements);
+                    $this->push($result ?? JsUndefined::Value);
+                } else {
+                    throw new VmException('TypeError: ' . gettype($callee) . ' is not a function');
+                }
+                $frame = $this->frame;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
+                $constants = $frame->constants;
+                $names = $frame->names;
+                $env = $frame->env;
+                $ip = $frame->ip;
+                $sp = $this->sp;
+                $regs = &$frame->registers;
+                break;
+
+            case OpCode::CallSpreadOpt:
+                $argsArray = $stack[--$sp];
+                $callee = $stack[--$sp];
+                if ($callee === null || $callee === JsUndefined::Value) {
+                    $stack[$sp++] = JsUndefined::Value;
+                    break;
+                }
                 $this->sp = $sp;
                 $frame->ip = $ip;
                 $frame->env = $env;
@@ -672,6 +727,8 @@ final class VirtualMachine
             OpCode::New         => $this->doNew($a),
             OpCode::Return      => $this->doReturn(),
             OpCode::CallSpread  => $this->callSpread(),
+            OpCode::CallOpt     => $this->callOpt($a),
+            OpCode::CallSpreadOpt => $this->callSpreadOpt(),
             OpCode::NewSpread   => $this->newSpread(),
 
             // ── Scope ──
@@ -1014,6 +1071,32 @@ final class VirtualMachine
         } else {
             throw new VmException('TypeError: ' . gettype($callee) . ' is not a function');
         }
+    }
+
+    private function callOpt(int $argCount): void
+    {
+        $calleeIdx = $this->sp - $argCount - 1;
+        $callee = $this->stack[$calleeIdx];
+        if ($callee === null || $callee === JsUndefined::Value) {
+            $this->sp = $calleeIdx;
+            $this->push(JsUndefined::Value);
+            return;
+        }
+        $this->call($argCount);
+    }
+
+    private function callSpreadOpt(): void
+    {
+        $argsArray = $this->pop();
+        $callee = $this->pop();
+        if ($callee === null || $callee === JsUndefined::Value) {
+            $this->push(JsUndefined::Value);
+            return;
+        }
+        // Re-push and delegate
+        $this->push($callee);
+        $this->push($argsArray);
+        $this->callSpread();
     }
 
     private function newSpread(): void

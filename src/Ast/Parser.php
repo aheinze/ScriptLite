@@ -462,12 +462,22 @@ final class Parser
         $left = $this->parsePrefixExpr();
 
         // Infix / LED (left denotation)
+        $inOptionalChain = false;
         while (true) {
             $bp = $this->infixBindingPower($this->current->type);
             if ($bp === null || $bp[0] < $minBp) {
                 break;
             }
             [$leftBp, $rightBp] = $bp;
+
+            // Reset chain flag on non-chain tokens
+            $isChainToken = $this->current->type === TokenType::Dot
+                || $this->current->type === TokenType::OptionalChain
+                || $this->current->type === TokenType::LeftBracket
+                || $this->current->type === TokenType::LeftParen;
+            if (!$isChainToken) {
+                $inOptionalChain = false;
+            }
 
             // Special handling for logical operators (short-circuit semantics in VM)
             if ($this->current->type === TokenType::And || $this->current->type === TokenType::Or
@@ -482,14 +492,26 @@ final class Parser
             if ($this->current->type === TokenType::Dot) {
                 $this->advance();
                 $prop = $this->expect(TokenType::Identifier, 'Expected property name after "."');
-                $left = new MemberExpr($left, new Identifier($prop->value), false);
+                $left = new MemberExpr($left, new Identifier($prop->value), false, optionalChain: $inOptionalChain);
                 continue;
             }
 
             if ($this->current->type === TokenType::OptionalChain) {
                 $this->advance();
-                $prop = $this->expect(TokenType::Identifier, 'Expected property name after "?."');
-                $left = new MemberExpr($left, new Identifier($prop->value), false, true);
+                $inOptionalChain = true;
+                if ($this->current->type === TokenType::LeftBracket) {
+                    // ?.["key"] — optional computed access
+                    $this->advance();
+                    $prop = $this->parseExpression();
+                    $this->expect(TokenType::RightBracket);
+                    $left = new MemberExpr($left, $prop, true, optional: true);
+                } elseif ($this->current->type === TokenType::LeftParen) {
+                    // ?.() — optional call
+                    $left = $this->parseCallExpr($left, optional: true);
+                } else {
+                    $prop = $this->expect(TokenType::Identifier, 'Expected property name after "?."');
+                    $left = new MemberExpr($left, new Identifier($prop->value), false, optional: true);
+                }
                 continue;
             }
 
@@ -497,13 +519,13 @@ final class Parser
                 $this->advance();
                 $prop = $this->parseExpression();
                 $this->expect(TokenType::RightBracket);
-                $left = new MemberExpr($left, $prop, true);
+                $left = new MemberExpr($left, $prop, true, optionalChain: $inOptionalChain);
                 continue;
             }
 
             // Function call — ( is an infix operator with high binding power
             if ($this->current->type === TokenType::LeftParen) {
-                $left = $this->parseCallExpr($left);
+                $left = $this->parseCallExpr($left, optionalChain: $inOptionalChain);
                 continue;
             }
 
@@ -896,7 +918,7 @@ final class Parser
         return new TemplateLiteral($quasis, $expressions);
     }
 
-    private function parseCallExpr(Expr $callee): CallExpr
+    private function parseCallExpr(Expr $callee, bool $optional = false, bool $optionalChain = false): CallExpr
     {
         $this->expect(TokenType::LeftParen);
         $args = [];
@@ -907,7 +929,7 @@ final class Parser
             }
         }
         $this->expect(TokenType::RightParen);
-        return new CallExpr($callee, $args);
+        return new CallExpr($callee, $args, $optional, $optionalChain);
     }
 
     private function parseCallArgument(): Expr

@@ -13,5 +13,7 @@ final readonly class CallExpr implements Expr
     public function __construct(
         public Expr  $callee,
         public array $arguments,
+        public bool  $optional = false,
+        public bool  $optionalChain = false,
     ) {}
 }

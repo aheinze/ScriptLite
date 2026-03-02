@@ -924,14 +924,25 @@ final class PhpTranspiler
             : $this->emitExpr($e->object);
         $objType = $this->inferType($e->object);
 
-        // Optional chaining: obj?.prop → temp var + null guard
-        if ($e->optional) {
+        // Optional chaining: obj?.prop or chain continuation → temp var + null guard
+        if ($e->optional || $e->optionalChain) {
             $tmp = '$__oc' . ($this->tmpId++);
             if (!$e->computed && $e->property instanceof Identifier) {
-                if ($objType === TypeHint::Object_) {
-                    return "(({$tmp} = {$obj}) === null ? null : ({$tmp}->properties['{$e->property->name}'] ?? null))";
+                $name = $e->property->name;
+                // .length needs specialized handling even in optional chains
+                if ($name === 'length') {
+                    if ($objType === TypeHint::Array_) {
+                        return "(({$tmp} = {$obj}) === null ? null : count({$tmp}))";
+                    }
+                    if ($objType === TypeHint::String) {
+                        return "(({$tmp} = {$obj}) === null ? null : mb_strlen({$tmp}))";
+                    }
+                    return "(({$tmp} = {$obj}) === null ? null : (is_string({$tmp}) ? mb_strlen({$tmp}) : count({$tmp})))";
                 }
-                return "(({$tmp} = {$obj}) === null ? null : {$tmp}['{$e->property->name}'])";
+                if ($objType === TypeHint::Object_) {
+                    return "(({$tmp} = {$obj}) === null ? null : ({$tmp}->properties['{$name}'] ?? null))";
+                }
+                return "(({$tmp} = {$obj}) === null ? null : {$tmp}['{$name}'])";
             }
             $key = $this->emitExpr($e->property);
             return "(({$tmp} = {$obj}) === null ? null : {$tmp}[{$key}])";
@@ -949,7 +960,7 @@ final class PhpTranspiler
                     'LN10' => 'M_LN10',
                     'LOG2E' => 'M_LOG2E',
                     'LOG10E' => 'M_LOG10E',
-                    'SQRT1_2' => 'M_SQRT1_2',   // PHP has no M_SQRT1_2 constant
+                    'SQRT1_2' => 'M_SQRT1_2',
                     'SQRT2' => 'M_SQRT2',
                     default => "\${$e->object->name}['{$name}']",
                 };
@@ -1126,13 +1137,15 @@ final class PhpTranspiler
 
     private function emitCall(CallExpr $e): string
     {
+        $useOpt = $e->optional || $e->optionalChain;
+
         // Method call: obj.method(args)
         if ($e->callee instanceof MemberExpr && !$e->callee->computed && $e->callee->property instanceof Identifier) {
-            return $this->emitMethodCall($e->callee, $e->arguments);
+            return $this->emitMethodCall($e->callee, $e->arguments, $useOpt);
         }
 
-        // Built-in global functions (only when no spread args)
-        if ($e->callee instanceof Identifier && !$this->hasSpreadArg($e->arguments)) {
+        // Built-in global functions (only when no spread args, and not optional)
+        if (!$useOpt && $e->callee instanceof Identifier && !$this->hasSpreadArg($e->arguments)) {
             $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
             $mapped = match ($e->callee->name) {
                 'isNaN' => 'is_nan(' . self::OPS . '::toNumber(' . $args[0] . '))',
@@ -1155,6 +1168,14 @@ final class PhpTranspiler
         // Wrap function expressions in parens for IIFE: (function(){...})(args)
         if ($e->callee instanceof FunctionExpr) {
             $callee = '(' . $callee . ')';
+        }
+
+        // Optional call: wrap callee in null guard
+        if ($useOpt) {
+            $tmp = '$__oc' . ($this->tmpId++);
+            $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
+            $argStr = implode(', ', $args);
+            return "(({$tmp} = {$callee}) === null ? null : {$tmp}({$argStr}))";
         }
 
         $hasSpread = false;
@@ -1207,7 +1228,7 @@ final class PhpTranspiler
     }
 
     /** @param Expr[] $args */
-    private function emitMethodCall(MemberExpr $callee, array $args): string
+    private function emitMethodCall(MemberExpr $callee, array $args, bool $optional = false): string
     {
         $method = $callee->property->name;
         $obj = $callee->object instanceof FunctionExpr
@@ -1215,6 +1236,17 @@ final class PhpTranspiler
             : $this->emitExpr($callee->object);
         $emitArgs = fn() => array_map(fn(Expr $a) => $this->emitExpr($a), $args);
         $objectType = $this->inferType($callee->object);
+
+        // Optional chain: guard the receiver against null
+        if ($optional) {
+            $tmp = '$__oc' . ($this->tmpId++);
+            $a = $emitArgs();
+            $dynamicMethod = $objectType === TypeHint::Object_
+                ? "({$tmp}->properties['{$method}'] ?? null)"
+                : "{$tmp}['{$method}']";
+            return "(({$tmp} = {$obj}) === null ? null : {$dynamicMethod}(" . implode(', ', $a) . '))';
+        }
+
         $dynamicMethod = $objectType === TypeHint::Object_
             ? "({$obj}->properties['{$method}'] ?? null)"
             : "{$obj}['{$method}']";

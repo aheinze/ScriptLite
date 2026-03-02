@@ -76,6 +76,8 @@ enum OpCode: int
     case New         = 53;  // Construct (operand = arg count). Like Call but creates new object, binds `this`
     case CallSpread  = 54;  // Call with spread: TOS = JsArray of args, below = callee
     case NewSpread   = 55;  // new with spread: TOS = JsArray of args, below = callee
+    case CallOpt     = 56;  // Like Call but pushes undefined if callee is null/undefined
+    case CallSpreadOpt = 57; // Like CallSpread but pushes undefined if callee is null/undefined
 
     // Exception handling
     case SetCatch    = 60;  // Push exception handler (operandA = catch handler IP)

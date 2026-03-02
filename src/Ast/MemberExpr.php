@@ -14,5 +14,6 @@ final readonly class MemberExpr implements Expr
         public Expr $property,
         public bool $computed,
         public bool $optional = false,
+        public bool $optionalChain = false,
     ) {}
 }

@@ -100,4 +100,88 @@ class OptionalChainingTest extends ScriptLiteTestCase
             arr?.items.length
         ', 3);
     }
+
+    // ═══════════════════ Optional computed access ?.[] ═══════════════════
+
+    public function testOptionalComputedOnObject(): void
+    {
+        $this->assertBothBackends('var obj = {x: 42}; obj?.["x"]', 42);
+    }
+
+    public function testOptionalComputedOnNull(): void
+    {
+        $this->assertBothBackends('var obj = null; obj?.["x"]', null);
+    }
+
+    public function testOptionalComputedDynamic(): void
+    {
+        $this->assertBothBackends('var obj = {x: 42}; var k = "x"; obj?.[k]', 42);
+    }
+
+    // ═══════════════════ Optional call ?.() ═══════════════════
+
+    public function testOptionalCallOnFunction(): void
+    {
+        $this->assertBothBackends('var fn = function() { return 42; }; fn?.()', 42);
+    }
+
+    public function testOptionalCallOnNull(): void
+    {
+        $this->assertBothBackends('var fn = null; fn?.()', null);
+    }
+
+    public function testOptionalCallOnUndefined(): void
+    {
+        $this->assertBothBackends('var fn = undefined; fn?.()', null);
+    }
+
+    public function testOptionalCallWithArgs(): void
+    {
+        $this->assertBothBackends('var fn = function(a, b) { return a + b; }; fn?.(1, 2)', 3);
+    }
+
+    // ═══════════════════ Deep chain short-circuiting ═══════════════════
+
+    public function testDeepChainShortCircuits(): void
+    {
+        $this->assertBothBackends('var a = null; a?.b.c', null);
+    }
+
+    public function testDeepChainShortCircuitsCall(): void
+    {
+        $this->assertBothBackends('var a = null; a?.b.c()', null);
+    }
+
+    public function testDeepChainShortCircuitsComputed(): void
+    {
+        $this->assertBothBackends('var a = null; a?.b["c"]', null);
+    }
+
+    public function testDeepChainSuccess(): void
+    {
+        $this->assertBothBackends('
+            var a = {b: {c: {d: function() { return 99; }}}};
+            a?.b.c.d()
+        ', 99);
+    }
+
+    public function testMixedOptionalChains(): void
+    {
+        $this->assertBothBackends('var a = null; a?.b?.c.d', null);
+        $this->assertBothBackends('var a = {b: null}; a?.b?.c.d', null);
+    }
+
+    public function testOptionalCallInChain(): void
+    {
+        $this->assertBothBackends('var a = null; a?.b()?.c', null);
+        $this->assertBothBackends('
+            var a = {b: function() { return {c: 10}; }};
+            a?.b()?.c
+        ', 10);
+    }
+
+    public function testOptionalMethodOnNull(): void
+    {
+        $this->assertBothBackends('var obj = null; obj?.toString()', null);
+    }
 }

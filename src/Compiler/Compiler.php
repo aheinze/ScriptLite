@@ -788,7 +788,8 @@ final class Compiler
             assert($expr->property instanceof Identifier);
             $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
         }
-        $this->emit($expr->optional ? OpCode::GetPropertyOpt : OpCode::GetProperty);
+        $useOpt = $expr->optional || $expr->optionalChain;
+        $this->emit($useOpt ? OpCode::GetPropertyOpt : OpCode::GetProperty);
     }
 
     private function compileMemberAssign(MemberAssignExpr $expr): void
@@ -1080,13 +1081,15 @@ final class Compiler
             if ($a instanceof SpreadElement) { $hasSpread = true; break; }
         }
 
+        $useOpt = $expr->optional || $expr->optionalChain;
+
         $this->compileExpr($expr->callee);
 
         if (!$hasSpread) {
             foreach ($expr->arguments as $arg) {
                 $this->compileExpr($arg);
             }
-            $this->emit(OpCode::Call, count($expr->arguments));
+            $this->emit($useOpt ? OpCode::CallOpt : OpCode::Call, count($expr->arguments));
         } else {
             // Spread path: build args array, then CallSpread
             $this->emit(OpCode::MakeArray, 0);
@@ -1099,7 +1102,7 @@ final class Compiler
                     $this->emit(OpCode::ArrayPush);
                 }
             }
-            $this->emit(OpCode::CallSpread);
+            $this->emit($useOpt ? OpCode::CallSpreadOpt : OpCode::CallSpread);
         }
     }
 
