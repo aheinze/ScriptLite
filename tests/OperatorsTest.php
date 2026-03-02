@@ -4,65 +4,54 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class OperatorsTest extends TestCase
+class OperatorsTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Ternary Operator ═══════════════════
 
     public function testTernaryBasic(): void
     {
-        self::assertSame(1, $this->engine->eval('true ? 1 : 2'));
-        self::assertSame(2, $this->engine->eval('false ? 1 : 2'));
+        $this->assertBothBackends('true ? 1 : 2', 1);
+        $this->assertBothBackends('false ? 1 : 2', 2);
     }
 
     public function testTernaryWithExpressions(): void
     {
-        self::assertSame(10, $this->engine->eval('(3 > 2) ? 5 * 2 : 5 + 2'));
-        self::assertSame(7, $this->engine->eval('(3 < 2) ? 5 * 2 : 5 + 2'));
+        $this->assertBothBackends('(3 > 2) ? 5 * 2 : 5 + 2', 10);
+        $this->assertBothBackends('(3 < 2) ? 5 * 2 : 5 + 2', 7);
     }
 
     public function testTernaryNested(): void
     {
         // Right-associative: a ? b : c ? d : e  ===  a ? b : (c ? d : e)
-        self::assertSame(3, $this->engine->eval('false ? 1 : false ? 2 : 3'));
-        self::assertSame(1, $this->engine->eval('true ? 1 : true ? 2 : 3'));
-        self::assertSame(2, $this->engine->eval('false ? 1 : true ? 2 : 3'));
+        $this->assertBothBackends('false ? 1 : false ? 2 : 3', 3);
+        $this->assertBothBackends('true ? 1 : true ? 2 : 3', 1);
+        $this->assertBothBackends('false ? 1 : true ? 2 : 3', 2);
     }
 
     public function testTernaryInFunction(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function abs(x) {
                 return x >= 0 ? x : -x;
             }
             abs(-42);
-        ');
-        self::assertSame(42, $result);
+        ', 42);
     }
 
     public function testTernaryWithVariables(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var mode = "dark";
             var bg = mode === "dark" ? "black" : "white";
             bg;
-        ');
-        self::assertSame('black', $result);
+        ', 'black');
     }
 
     public function testTernaryStringEquality(): void
     {
-        self::assertSame('yes', $this->engine->eval('"a" === "a" ? "yes" : "no"'));
-        self::assertSame('no', $this->engine->eval('"a" === "b" ? "yes" : "no"'));
+        $this->assertBothBackends('"a" === "a" ? "yes" : "no"', 'yes');
+        $this->assertBothBackends('"a" === "b" ? "yes" : "no"', 'no');
     }
 
     // ═══════════════════ typeof Operator ═══════════════════

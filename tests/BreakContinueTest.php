@@ -4,17 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class BreakContinueTest extends TestCase
+class BreakContinueTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ break in while ═══════════════════
 
@@ -28,7 +19,7 @@ final class BreakContinueTest extends TestCase
             }
             i
         ';
-        self::assertSame(5, $this->engine->eval($code));
+        $this->assertBothBackends($code, 5);
     }
 
     public function testBreakExitsImmediately(): void
@@ -44,7 +35,7 @@ final class BreakContinueTest extends TestCase
             sum
         ';
         // 0 + 1 + 2 = 3
-        self::assertSame(3, $this->engine->eval($code));
+        $this->assertBothBackends($code, 3);
     }
 
     // ═══════════════════ break in for ═══════════════════
@@ -60,7 +51,7 @@ final class BreakContinueTest extends TestCase
             sum
         ';
         // 0+1+2+3+4 = 10
-        self::assertSame(10, $this->engine->eval($code));
+        $this->assertBothBackends($code, 10);
     }
 
     // ═══════════════════ continue in while ═══════════════════
@@ -78,7 +69,7 @@ final class BreakContinueTest extends TestCase
             sum
         ';
         // 1+3+5+7+9 = 25
-        self::assertSame(25, $this->engine->eval($code));
+        $this->assertBothBackends($code, 25);
     }
 
     // ═══════════════════ continue in for ═══════════════════
@@ -94,7 +85,7 @@ final class BreakContinueTest extends TestCase
             sum
         ';
         // 1+3+5+7+9 = 25
-        self::assertSame(25, $this->engine->eval($code));
+        $this->assertBothBackends($code, 25);
     }
 
     public function testContinueExecutesUpdate(): void
@@ -109,7 +100,7 @@ final class BreakContinueTest extends TestCase
             result
         ';
         // 0+1+3+4 = 8 (skips i=2)
-        self::assertSame(8, $this->engine->eval($code));
+        $this->assertBothBackends($code, 8);
     }
 
     // ═══════════════════ Nested loops ═══════════════════
@@ -127,7 +118,7 @@ final class BreakContinueTest extends TestCase
             count
         ';
         // Inner loop runs 2 iterations (j=0,1) × 3 outer iterations = 6
-        self::assertSame(6, $this->engine->eval($code));
+        $this->assertBothBackends($code, 6);
     }
 
     public function testContinueOnlyAffectsInnermost(): void
@@ -143,7 +134,7 @@ final class BreakContinueTest extends TestCase
             count
         ';
         // Inner: 3 of 4 iterations counted × 3 outer = 9
-        self::assertSame(9, $this->engine->eval($code));
+        $this->assertBothBackends($code, 9);
     }
 
     // ═══════════════════ break in do-while ═══════════════════
@@ -158,7 +149,7 @@ final class BreakContinueTest extends TestCase
             } while (true);
             i
         ';
-        self::assertSame(3, $this->engine->eval($code));
+        $this->assertBothBackends($code, 3);
     }
 
     // ═══════════════════ continue in do-while ═══════════════════
@@ -176,47 +167,6 @@ final class BreakContinueTest extends TestCase
             sum
         ';
         // 1+3+5+7+9 = 25
-        self::assertSame(25, $this->engine->eval($code));
-    }
-
-    // ═══════════════════ Transpiler path ═══════════════════
-
-    public function testTranspilerBreakInFor(): void
-    {
-        $php = $this->engine->transpile('
-            var sum = 0;
-            for (var i = 0; i < 10; i = i + 1) {
-                if (i === 5) break;
-                sum = sum + i;
-            }
-            sum
-        ');
-        self::assertSame(10, $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerContinueInFor(): void
-    {
-        $php = $this->engine->transpile('
-            var sum = 0;
-            for (var i = 0; i < 10; i = i + 1) {
-                if (i % 2 === 0) continue;
-                sum = sum + i;
-            }
-            sum
-        ');
-        self::assertSame(25, $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerBreakInWhile(): void
-    {
-        $php = $this->engine->transpile('
-            var i = 0;
-            while (true) {
-                if (i === 5) break;
-                i = i + 1;
-            }
-            i
-        ');
-        self::assertSame(5, $this->engine->evalTranspiled($php));
+        $this->assertBothBackends($code, 25);
     }
 }

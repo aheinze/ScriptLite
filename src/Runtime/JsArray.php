@@ -19,6 +19,10 @@ final class JsArray
     /** @var array<string, mixed> Ad-hoc named properties (e.g. 'index', 'input' on regex match results) */
     public array $properties = [];
 
+    /** @var array<string, NativeFunction> Cached method wrappers to avoid per-access allocation */
+    private array $methodCache = [];
+    private ?\Closure $cachedInvoker = null;
+
     /** @param mixed[] $elements */
     public function __construct(array $elements = [])
     {
@@ -36,10 +40,20 @@ final class JsArray
             return count($this->elements);
         }
 
-        // Method lookup — returns a NativeFunction bound to this array
+        // Method lookup — returns a cached NativeFunction bound to this array
         if (is_string($key)) {
-            $method = $this->getMethod($key, $invoker);
+            if ($invoker !== $this->cachedInvoker) {
+                $this->methodCache = [];
+                $this->cachedInvoker = $invoker;
+            }
+
+            if (isset($this->methodCache[$key])) {
+                return $this->methodCache[$key];
+            }
+
+            $method = $this->buildMethod($key, $invoker);
             if ($method !== null) {
+                $this->methodCache[$key] = $method;
                 return $method;
             }
         }
@@ -75,7 +89,7 @@ final class JsArray
         $this->elements[$idx] = $value;
     }
 
-    private function getMethod(string $name, ?\Closure $invoker = null): ?NativeFunction
+    private function buildMethod(string $name, ?\Closure $invoker = null): ?NativeFunction
     {
         return match ($name) {
             // ── Mutators ──

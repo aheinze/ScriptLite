@@ -4,7 +4,7 @@ An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subs
 
 Two execution backends:
 - **Bytecode VM** — a stack-based virtual machine with 55 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~64x faster than the VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~18x faster than the VM)
 
 ## Quick start
 
@@ -38,13 +38,15 @@ $result = $engine->evalTranspiled($php);
 
 **Operators:** arithmetic (`+` `-` `*` `/` `%` `**`), increment/decrement (`++` `--`, prefix and postfix), comparison (`==` `!=` `===` `!==` `<` `<=` `>` `>=`), logical (`&&` `||` `!`), bitwise (`&` `|` `^` `~` `<<` `>>` `>>>`), nullish coalescing (`??`), ternary (`? :`), optional chaining (`?.`), typeof, void, delete, in, instanceof, assignment (`=` `+=` `-=` `*=` `/=` `%=` `**=` `??=` `&=` `|=` `^=` `<<=` `>>=` `>>>=`)
 
-**Control flow:** `if`/`else`, `while`, `for`, `do...while`, `switch`/`case`/`default`, `break`, `continue`, `return`
+**Control flow:** `if`/`else`, `while`, `for`, `for...of`, `for...in`, `do...while`, `switch`/`case`/`default`, `break`, `continue`, `return`
 
 **Error handling:** `try`/`catch`, `throw`
 
-**Variables:** `var` (function-scoped, hoisted), `let` (block-scoped), `const` (block-scoped, immutable)
+**Variables:** `var` (function-scoped, hoisted), `let` (block-scoped), `const` (block-scoped, immutable), array destructuring (`var [a, b, ...rest] = arr`), object destructuring (`var {name, age: a} = obj`) with defaults
 
 **Functions:** declarations, expressions, arrow functions (`=>` with expression and block bodies), closures with lexical scoping, recursion, `new` / constructors / `this`, rest parameters, spread syntax
+
+**Object literals:** shorthand properties (`{x, y}`), computed property names (`{[expr]: value}`)
 
 **Template literals:** `` `hello ${name}` `` with expression interpolation and nesting
 
@@ -55,6 +57,7 @@ $result = $engine->evalTranspiled($php);
 - `String()`, `String.fromCharCode()`
 - `parseInt()`, `parseFloat()`, `isNaN()`, `isFinite()`
 - `Date`, `Date.now()`
+- `JSON.stringify()`, `JSON.parse()`
 
 **Array methods:** `push`, `pop`, `shift`, `unshift`, `map`, `filter`, `reduce`, `forEach`, `every`, `some`, `find`, `findIndex`, `indexOf`, `includes`, `join`, `concat`, `slice`, `splice`, `sort`, `reverse`, `flat`, `fill`
 
@@ -217,7 +220,7 @@ The transpiler maps ECMAScript constructs directly to PHP equivalents:
 php vendor/bin/phpunit tests/
 ```
 
-533 PHPUnit tests across 27 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, do-while, functions, globals, number/string objects, objects, operators, regex, scoping, string methods, switch, template literals, try/catch, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), and edge cases.
+676 PHPUnit tests (1479 assertions) across 30 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring, do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, regex, scoping, string methods, switch, template literals, try/catch, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), fuzzing, and edge cases.
 
 ## Benchmark
 
@@ -229,9 +232,9 @@ Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort,
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~72 ms | ~100x |
-| Transpiled PHP (eval'd) | ~1.1 ms | ~1.6x |
-| Native PHP (hand-written) | ~0.7 ms | 1x |
+| VM (bytecode interpreter) | ~80 ms | ~107x |
+| Transpiled PHP (eval'd) | ~4.3 ms | ~5.8x |
+| Native PHP (hand-written) | ~0.75 ms | 1x |
 
 
 ## License

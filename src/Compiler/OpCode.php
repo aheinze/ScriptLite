@@ -29,6 +29,7 @@ enum OpCode: int
     case Not         = 16;  // Logical not
     case Typeof      = 17;  // typeof — push type string
     case Exp         = 18;  // **  (exponentiation)
+    case TypeofVar   = 19;  // typeof <identifier> — safe: pushes "undefined" if not defined
 
     // Comparison
     case Eq          = 20;  // ==

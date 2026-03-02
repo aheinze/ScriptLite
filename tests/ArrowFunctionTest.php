@@ -4,188 +4,177 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class ArrowFunctionTest extends TestCase
+class ArrowFunctionTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Expression body ═══════════════════
 
     public function testSingleParamNoParens(): void
     {
-        self::assertSame(10, $this->engine->eval('var f = x => x * 2; f(5)'));
+        $this->assertBothBackends('var f = x => x * 2; f(5)', 10);
     }
 
     public function testSingleParamWithParens(): void
     {
-        self::assertSame(10, $this->engine->eval('var f = (x) => x * 2; f(5)'));
+        $this->assertBothBackends('var f = (x) => x * 2; f(5)', 10);
     }
 
     public function testMultipleParams(): void
     {
-        self::assertSame(7, $this->engine->eval('var f = (a, b) => a + b; f(3, 4)'));
+        $this->assertBothBackends('var f = (a, b) => a + b; f(3, 4)', 7);
     }
 
     public function testNoParams(): void
     {
-        self::assertSame(42, $this->engine->eval('var f = () => 42; f()'));
+        $this->assertBothBackends('var f = () => 42; f()', 42);
     }
 
     public function testExpressionBodyString(): void
     {
-        self::assertSame('hello world', $this->engine->eval('var f = (a, b) => a + " " + b; f("hello", "world")'));
+        $this->assertBothBackends('var f = (a, b) => a + " " + b; f("hello", "world")', 'hello world');
     }
 
     // ═══════════════════ Block body ═══════════════════
 
     public function testBlockBody(): void
     {
-        self::assertSame(10, $this->engine->eval('var f = x => { return x * 2; }; f(5)'));
+        $this->assertBothBackends('var f = x => { return x * 2; }; f(5)', 10);
     }
 
     public function testBlockBodyMultipleParams(): void
     {
-        self::assertSame(12, $this->engine->eval('
+        $this->assertBothBackends('
             var f = (a, b) => {
                 var sum = a + b;
                 return sum * 2;
             };
             f(2, 4)
-        '));
+        ', 12);
     }
 
     public function testBlockBodyNoReturn(): void
     {
         // Block body with no return should return undefined (null in PHP)
-        self::assertNull($this->engine->eval('var f = () => {}; f()'));
+        $this->assertBothBackends('var f = () => {}; f()', null);
     }
 
     // ═══════════════════ Closure capture ═══════════════════
 
     public function testClosureCapture(): void
     {
-        self::assertSame(15, $this->engine->eval('
+        $this->assertBothBackends('
             var multiplier = 3;
             var f = x => x * multiplier;
             f(5)
-        '));
+        ', 15);
     }
 
     public function testClosureCaptureEnclosing(): void
     {
-        self::assertSame(10, $this->engine->eval('
+        $this->assertBothBackends('
             function make() {
                 var base = 10;
                 return () => base;
             }
             make()()
-        '));
+        ', 10);
     }
 
     // ═══════════════════ Nested arrows ═══════════════════
 
     public function testNestedArrows(): void
     {
-        self::assertSame(3, $this->engine->eval('
+        $this->assertBothBackends('
             var f = x => y => x + y;
             f(1)(2)
-        '));
+        ', 3);
     }
 
     public function testNestedArrowsThreeDeep(): void
     {
-        self::assertSame(6, $this->engine->eval('
+        $this->assertBothBackends('
             var f = a => b => c => a + b + c;
             f(1)(2)(3)
-        '));
+        ', 6);
     }
 
     // ═══════════════════ As arguments ═══════════════════
 
     public function testAsCallbackArgument(): void
     {
-        self::assertSame(6, $this->engine->eval('
+        $this->assertBothBackends('
             function apply(fn, val) { return fn(val); }
             apply(x => x * 2, 3)
-        '));
+        ', 6);
     }
 
     public function testMapCallback(): void
     {
-        $result = $this->engine->eval('[1, 2, 3].map(x => x * 2)');
-        self::assertSame([2, 4, 6], $result);
+        $this->assertBothBackends('[1, 2, 3].map(x => x * 2)', [2, 4, 6]);
     }
 
     public function testFilterCallback(): void
     {
-        $result = $this->engine->eval('[1, 2, 3, 4, 5].filter(x => x > 3)');
-        self::assertSame([4, 5], $result);
+        $this->assertBothBackends('[1, 2, 3, 4, 5].filter(x => x > 3)', [4, 5]);
     }
 
     // ═══════════════════ With operators ═══════════════════
 
     public function testWithTernary(): void
     {
-        self::assertSame('yes', $this->engine->eval('var f = x => x > 0 ? "yes" : "no"; f(1)'));
+        $this->assertBothBackends('var f = x => x > 0 ? "yes" : "no"; f(1)', 'yes');
     }
 
     public function testWithLogicalOr(): void
     {
-        self::assertSame('default', $this->engine->eval('var f = x => x || "default"; f("")'));
+        $this->assertBothBackends('var f = x => x || "default"; f("")', 'default');
     }
 
     public function testWithLogicalAnd(): void
     {
-        self::assertSame(false, $this->engine->eval('var f = x => x && true; f(false)'));
+        $this->assertBothBackends('var f = x => x && true; f(false)', false);
     }
 
     // ═══════════════════ IIFE ═══════════════════
 
     public function testImmediatelyInvoked(): void
     {
-        self::assertSame(42, $this->engine->eval('(x => x * 2)(21)'));
+        $this->assertBothBackends('(x => x * 2)(21)', 42);
     }
 
     public function testImmediatelyInvokedNoParams(): void
     {
-        self::assertSame(99, $this->engine->eval('(() => 99)()'));
+        $this->assertBothBackends('(() => 99)()', 99);
     }
 
     // ═══════════════════ Variable assignment ═══════════════════
 
     public function testAssignedToVar(): void
     {
-        self::assertSame(6, $this->engine->eval('var double = x => x * 2; double(3)'));
+        $this->assertBothBackends('var double = x => x * 2; double(3)', 6);
     }
 
     public function testAssignedToLet(): void
     {
-        self::assertSame(9, $this->engine->eval('let square = x => x * x; square(3)'));
+        $this->assertBothBackends('let square = x => x * x; square(3)', 9);
     }
 
     public function testAssignedToConst(): void
     {
-        self::assertSame(8, $this->engine->eval('const cube = x => x * x * x; cube(2)'));
+        $this->assertBothBackends('const cube = x => x * x * x; cube(2)', 8);
     }
 
     // ═══════════════════ Return arrow from function ═══════════════════
 
     public function testReturnedFromFunction(): void
     {
-        self::assertSame(15, $this->engine->eval('
+        $this->assertBothBackends('
             function makeAdder(n) {
                 return x => x + n;
             }
             var add5 = makeAdder(5);
             add5(10)
-        '));
+        ', 15);
     }
 
     // ═══════════════════ Transpiler path ═══════════════════

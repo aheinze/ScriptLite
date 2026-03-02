@@ -4,34 +4,24 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class FunctionsTest extends TestCase
+class FunctionsTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Functions & Closures ═══════════════════
 
     public function testFunctionDeclarationAndCall(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function add(a, b) {
                 return a + b;
             }
             add(3, 4);
-        ');
-        self::assertSame(7, $result);
+        ', 7);
     }
 
     public function testClosure(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function makeCounter() {
                 var count = 0;
                 function increment() {
@@ -44,13 +34,12 @@ final class FunctionsTest extends TestCase
             counter();
             counter();
             counter();
-        ');
-        self::assertSame(3, $result);
+        ', 3);
     }
 
     public function testClosureCapture(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function makeAdder(x) {
                 function adder(y) {
                     return x + y;
@@ -59,13 +48,25 @@ final class FunctionsTest extends TestCase
             }
             var add5 = makeAdder(5);
             add5(3);
-        ');
-        self::assertSame(8, $result);
+        ', 8);
+    }
+
+    public function testClosureMutatesOuterBinding(): void
+    {
+        $this->assertBothBackends('
+            let x = 1;
+            function add() {
+                x++;
+            }
+            add();
+            add();
+            x;
+        ', 3);
     }
 
     public function testMultipleClosuresOverSameScope(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function makePair() {
                 var value = 0;
                 function get() { return value; }
@@ -74,29 +75,26 @@ final class FunctionsTest extends TestCase
             }
             var getter = makePair();
             getter();
-        ');
-        self::assertSame(0, $result);
+        ', 0);
     }
 
     public function testFunctionExpression(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var double = function(x) { return x * 2; };
             double(21);
-        ');
-        self::assertSame(42, $result);
+        ', 42);
     }
 
     public function testRecursion(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function factorial(n) {
                 if (n <= 1) { return 1; }
                 return n * factorial(n - 1);
             }
             factorial(10);
-        ');
-        self::assertSame(3628800, $result);
+        ', 3628800);
     }
 
     // ═══════════════════ Scope Isolation ═══════════════════

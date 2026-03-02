@@ -4,17 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class SwitchTest extends TestCase
+class SwitchTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Basic matching ═══════════════════
 
@@ -36,7 +27,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('two', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'two');
     }
 
     public function testFirstCaseMatch(): void
@@ -53,7 +44,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('one', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'one');
     }
 
     // ═══════════════════ Default ═══════════════════
@@ -72,7 +63,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('other', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'other');
     }
 
     public function testDefaultNotReachedWhenMatched(): void
@@ -89,7 +80,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('one', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'one');
     }
 
     // ═══════════════════ Fall-through ═══════════════════
@@ -110,7 +101,7 @@ final class SwitchTest extends TestCase
             result
         ';
         // Matches case 1, falls through to 2 and 3
-        self::assertSame('abc', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'abc');
     }
 
     public function testFallThroughToDefault(): void
@@ -128,7 +119,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('bc', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'bc');
     }
 
     // ═══════════════════ No match, no default ═══════════════════
@@ -147,7 +138,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('unchanged', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'unchanged');
     }
 
     // ═══════════════════ String cases ═══════════════════
@@ -169,7 +160,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame(2, $this->engine->eval($code));
+        $this->assertBothBackends($code, 2);
     }
 
     // ═══════════════════ Strict equality ═══════════════════
@@ -189,7 +180,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('number', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'number');
     }
 
     // ═══════════════════ Expression discriminant ═══════════════════
@@ -208,7 +199,7 @@ final class SwitchTest extends TestCase
             }
             result
         ';
-        self::assertSame('two', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'two');
     }
 
     // ═══════════════════ Multiple statements per case ═══════════════════
@@ -226,62 +217,6 @@ final class SwitchTest extends TestCase
             }
             a + b
         ';
-        self::assertSame(30, $this->engine->eval($code));
-    }
-
-    // ═══════════════════ Transpiler path ═══════════════════
-
-    public function testTranspilerBasicSwitch(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "";
-            var x = 2;
-            switch (x) {
-                case 1:
-                    result = "one";
-                    break;
-                case 2:
-                    result = "two";
-                    break;
-                case 3:
-                    result = "three";
-                    break;
-            }
-            result
-        ');
-        self::assertSame('two', $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerDefault(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "";
-            switch (99) {
-                case 1:
-                    result = "one";
-                    break;
-                default:
-                    result = "other";
-                    break;
-            }
-            result
-        ');
-        self::assertSame('other', $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerFallThrough(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "";
-            switch (1) {
-                case 1:
-                    result = result + "a";
-                case 2:
-                    result = result + "b";
-                    break;
-            }
-            result
-        ');
-        self::assertSame('ab', $this->engine->evalTranspiled($php));
+        $this->assertBothBackends($code, 30);
     }
 }

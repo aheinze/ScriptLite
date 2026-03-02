@@ -5,143 +5,135 @@ declare(strict_types=1);
 namespace ScriptLite\Tests;
 
 use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
 
-final class TemplateLiteralTest extends TestCase
+class TemplateLiteralTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ No interpolation ═══════════════════
 
     public function testSimpleTemplate(): void
     {
-        self::assertSame('hello world', $this->engine->eval('`hello world`'));
+        $this->assertBothBackends('`hello world`', 'hello world');
     }
 
     public function testEmptyTemplate(): void
     {
-        self::assertSame('', $this->engine->eval('``'));
+        $this->assertBothBackends('``', '');
     }
 
     // ═══════════════════ Basic interpolation ═══════════════════
 
     public function testSingleInterpolation(): void
     {
-        self::assertSame('hello Alice', $this->engine->eval('var name = "Alice"; `hello ${name}`'));
+        $this->assertBothBackends('var name = "Alice"; `hello ${name}`', 'hello Alice');
     }
 
     public function testInterpolationAtStart(): void
     {
-        self::assertSame('Alice is here', $this->engine->eval('var name = "Alice"; `${name} is here`'));
+        $this->assertBothBackends('var name = "Alice"; `${name} is here`', 'Alice is here');
     }
 
     public function testInterpolationAtEnd(): void
     {
-        self::assertSame('name is Alice', $this->engine->eval('var name = "Alice"; `name is ${name}`'));
+        $this->assertBothBackends('var name = "Alice"; `name is ${name}`', 'name is Alice');
     }
 
     public function testMultipleInterpolations(): void
     {
-        self::assertSame('Alice is 30 years old', $this->engine->eval('
+        $this->assertBothBackends('
             var name = "Alice";
             var age = 30;
             `${name} is ${age} years old`
-        '));
+        ', 'Alice is 30 years old');
     }
 
     public function testAdjacentInterpolations(): void
     {
-        self::assertSame('AB', $this->engine->eval('var a = "A"; var b = "B"; `${a}${b}`'));
+        $this->assertBothBackends('var a = "A"; var b = "B"; `${a}${b}`', 'AB');
     }
 
     public function testOnlyInterpolation(): void
     {
-        self::assertSame('hello', $this->engine->eval('`${"hello"}`'));
+        $this->assertBothBackends('`${"hello"}`', 'hello');
     }
 
     // ═══════════════════ Expression interpolation ═══════════════════
 
     public function testExpressionInterpolation(): void
     {
-        self::assertSame('2 + 3 = 5', $this->engine->eval('`2 + 3 = ${2 + 3}`'));
+        $this->assertBothBackends('`2 + 3 = ${2 + 3}`', '2 + 3 = 5');
     }
 
     public function testFunctionCallInterpolation(): void
     {
-        self::assertSame('result: 6', $this->engine->eval('
+        $this->assertBothBackends('
             function double(x) { return x * 2; }
             `result: ${double(3)}`
-        '));
+        ', 'result: 6');
     }
 
     public function testTernaryInterpolation(): void
     {
-        self::assertSame('yes', $this->engine->eval('var x = true; `${x ? "yes" : "no"}`'));
+        $this->assertBothBackends('var x = true; `${x ? "yes" : "no"}`', 'yes');
     }
 
     public function testMethodCallInterpolation(): void
     {
-        self::assertSame('HELLO', $this->engine->eval('`${"hello".toUpperCase()}`'));
+        $this->assertBothBackends('`${"hello".toUpperCase()}`', 'HELLO');
     }
 
     // ═══════════════════ Type coercion ═══════════════════
 
     public function testNumberCoercion(): void
     {
-        self::assertSame('count: 42', $this->engine->eval('`count: ${42}`'));
+        $this->assertBothBackends('`count: ${42}`', 'count: 42');
     }
 
     public function testBooleanCoercion(): void
     {
-        self::assertSame('value: true', $this->engine->eval('`value: ${true}`'));
-        self::assertSame('value: false', $this->engine->eval('`value: ${false}`'));
+        $this->assertBothBackends('`value: ${true}`', 'value: true');
+        $this->assertBothBackends('`value: ${false}`', 'value: false');
     }
 
     public function testNullCoercion(): void
     {
-        self::assertSame('value: null', $this->engine->eval('`value: ${null}`'));
+        $this->assertBothBackends('`value: ${null}`', 'value: null');
     }
 
     // ═══════════════════ Nested braces ═══════════════════
 
     public function testObjectInsideInterpolation(): void
     {
-        self::assertSame('val: 1', $this->engine->eval('
+        $this->assertBothBackends('
             var obj = {a: 1};
             `val: ${obj.a}`
-        '));
+        ', 'val: 1');
     }
 
     // ═══════════════════ Multiline ═══════════════════
 
     public function testMultiline(): void
     {
-        $result = $this->engine->eval("`line1\nline2`");
-        self::assertSame("line1\nline2", $result);
+        $this->assertBothBackends("`line1\nline2`", "line1\nline2");
     }
 
     // ═══════════════════ With other operators ═══════════════════
 
     public function testTemplatePlusString(): void
     {
-        self::assertSame('hello world!', $this->engine->eval('`hello ` + "world!"'));
+        $this->assertBothBackends('`hello ` + "world!"', 'hello world!');
     }
 
     public function testStringPlusTemplate(): void
     {
-        self::assertSame('hello world!', $this->engine->eval('"hello " + `world!`'));
+        $this->assertBothBackends('"hello " + `world!`', 'hello world!');
     }
 
     // ═══════════════════ With globals ═══════════════════
 
     public function testWithGlobals(): void
     {
-        self::assertSame('Hello Alice!', $this->engine->eval('`Hello ${name}!`', ['name' => 'Alice']));
+        $this->assertBothBackends('`Hello ${name}!`', 'Hello Alice!', ['name' => 'Alice']);
     }
 
     // ═══════════════════ Transpiler path ═══════════════════

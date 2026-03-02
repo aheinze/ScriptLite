@@ -4,70 +4,61 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
 use ScriptLite\Vm\VmException;
-use PHPUnit\Framework\TestCase;
 
-final class StringsAndEdgeCasesTest extends TestCase
+class StringsAndEdgeCasesTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ String Operations ═══════════════════
 
     public function testStringConcatenation(): void
     {
-        self::assertSame('hello world', $this->engine->eval('"hello" + " " + "world"'));
+        $this->assertBothBackends('"hello" + " " + "world"', 'hello world');
     }
 
     public function testStringNumberCoercion(): void
     {
-        self::assertSame('Number: 42', $this->engine->eval('"Number: " + 42'));
+        $this->assertBothBackends('"Number: " + 42', 'Number: 42');
     }
 
     // ═══════════════════ Edge Cases ═══════════════════
 
     public function testBooleanLogic(): void
     {
-        self::assertTrue($this->engine->eval('true'));
-        self::assertFalse($this->engine->eval('false'));
-        self::assertTrue($this->engine->eval('!false'));
-        self::assertFalse($this->engine->eval('!true'));
+        $this->assertBothBackends('true', true);
+        $this->assertBothBackends('false', false);
+        $this->assertBothBackends('!false', true);
+        $this->assertBothBackends('!true', false);
     }
 
     public function testComparison(): void
     {
-        self::assertTrue($this->engine->eval('1 < 2'));
-        self::assertFalse($this->engine->eval('2 < 1'));
-        self::assertTrue($this->engine->eval('2 >= 2'));
-        self::assertTrue($this->engine->eval('3 > 2'));
+        $this->assertBothBackends('1 < 2', true);
+        $this->assertBothBackends('2 < 1', false);
+        $this->assertBothBackends('2 >= 2', true);
+        $this->assertBothBackends('3 > 2', true);
     }
 
     public function testLogicalOperators(): void
     {
         // Short-circuit AND: first falsy wins
-        self::assertSame(0, $this->engine->eval('0 && 5'));
+        $this->assertBothBackends('0 && 5', 0);
 
         // Short-circuit OR: first truthy wins
-        self::assertSame(5, $this->engine->eval('0 || 5'));
+        $this->assertBothBackends('0 || 5', 5);
 
         // Truthy AND returns right
-        self::assertSame(5, $this->engine->eval('1 && 5'));
+        $this->assertBothBackends('1 && 5', 5);
     }
 
     public function testFunctionHoisting(): void
     {
         // Function declarations should be hoisted (callable before declaration in source)
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var result = greet();
             function greet() { return 42; }
             result;
-        ');
-        self::assertSame(42, $result);
+        ', 42);
     }
 
     public function testConsoleLog(): void
@@ -79,14 +70,13 @@ final class StringsAndEdgeCasesTest extends TestCase
     public function testDeepRecursionDoesNotCrash(): void
     {
         // Test that we can handle moderate recursion depth
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function countdown(n) {
                 if (n <= 0) { return 0; }
                 return countdown(n - 1);
             }
             countdown(200);
-        ');
-        self::assertSame(0, $result);
+        ', 0);
     }
 
     public function testStackOverflowDetection(): void
@@ -116,30 +106,27 @@ final class StringsAndEdgeCasesTest extends TestCase
     public function testComplexExpressionPrecedence(): void
     {
         // 2 + 3 * 4 ** ... complex chain
-        self::assertSame(5, $this->engine->eval('10 / 2'));
-        self::assertSame(7, $this->engine->eval('1 + 2 * 3'));
-        self::assertSame(10, $this->engine->eval('(1 + 2) * 3 + 1'));
+        $this->assertBothBackends('10 / 2', 5);
+        $this->assertBothBackends('1 + 2 * 3', 7);
+        $this->assertBothBackends('(1 + 2) * 3 + 1', 10);
     }
 
     public function testNestedFunctionCalls(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function double(x) { return x * 2; }
             function addOne(x) { return x + 1; }
             addOne(double(addOne(double(3))));
-        ');
-        // double(3)=6, addOne(6)=7, double(7)=14, addOne(14)=15
-        self::assertSame(15, $result);
+        ', 15);
     }
 
     public function testMultipleStatements(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var a = 1;
             var b = 2;
             var c = 3;
             a + b + c;
-        ');
-        self::assertSame(6, $result);
+        ', 6);
     }
 }

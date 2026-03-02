@@ -4,81 +4,72 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class RegexTest extends TestCase
+class RegexTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Regex Literals ═══════════════════
 
     public function testTypeofRegex(): void
     {
-        self::assertSame('object', $this->engine->eval('typeof /abc/'));
+        $this->assertBothBackends('typeof /abc/', 'object');
     }
 
     public function testRegexToString(): void
     {
-        self::assertSame('/abc/gi', $this->engine->eval('"" + /abc/gi'));
+        $this->assertBothBackends('"" + /abc/gi', '/abc/gi');
     }
 
     public function testRegexSource(): void
     {
-        self::assertSame('abc', $this->engine->eval('/abc/gi.source'));
+        $this->assertBothBackends('/abc/gi.source', 'abc');
     }
 
     public function testRegexFlags(): void
     {
-        self::assertSame('gi', $this->engine->eval('/abc/gi.flags'));
+        $this->assertBothBackends('/abc/gi.flags', 'gi');
     }
 
     public function testRegexGlobal(): void
     {
-        self::assertTrue($this->engine->eval('/abc/g.global'));
-        self::assertFalse($this->engine->eval('/abc/.global'));
+        $this->assertBothBackends('/abc/g.global', true);
+        $this->assertBothBackends('/abc/.global', false);
     }
 
     public function testRegexIgnoreCase(): void
     {
-        self::assertTrue($this->engine->eval('/abc/i.ignoreCase'));
-        self::assertFalse($this->engine->eval('/abc/.ignoreCase'));
+        $this->assertBothBackends('/abc/i.ignoreCase', true);
+        $this->assertBothBackends('/abc/.ignoreCase', false);
     }
 
     // ═══════════════════ RegExp Constructor ═══════════════════
 
     public function testRegExpConstructor(): void
     {
-        self::assertSame('object', $this->engine->eval('typeof new RegExp("abc", "i")'));
+        $this->assertBothBackends('typeof new RegExp("abc", "i")', 'object');
     }
 
     public function testRegExpConstructorTest(): void
     {
-        self::assertTrue($this->engine->eval('new RegExp("abc", "i").test("ABC")'));
+        $this->assertBothBackends('new RegExp("abc", "i").test("ABC")', true);
     }
 
     public function testRegExpConstructorNoFlags(): void
     {
-        self::assertTrue($this->engine->eval('new RegExp("hello").test("hello world")'));
+        $this->assertBothBackends('new RegExp("hello").test("hello world")', true);
     }
 
     // ═══════════════════ test() ═══════════════════
 
     public function testTestMethod(): void
     {
-        self::assertTrue($this->engine->eval('/\\d+/.test("hello123")'));
-        self::assertFalse($this->engine->eval('/\\d+/.test("hello")'));
+        $this->assertBothBackends('/\\d+/.test("hello123")', true);
+        $this->assertBothBackends('/\\d+/.test("hello")', false);
     }
 
     public function testTestCaseInsensitive(): void
     {
-        self::assertTrue($this->engine->eval('/hello/i.test("HELLO WORLD")'));
-        self::assertFalse($this->engine->eval('/hello/.test("HELLO WORLD")'));
+        $this->assertBothBackends('/hello/i.test("HELLO WORLD")', true);
+        $this->assertBothBackends('/hello/.test("HELLO WORLD")', false);
     }
 
     // ═══════════════════ exec() ═══════════════════
@@ -99,14 +90,12 @@ final class RegexTest extends TestCase
 
     public function testExecIndex(): void
     {
-        $result = $this->engine->eval('var m = /\\d+/.exec("abc123"); m.index');
-        self::assertSame(3, $result);
+        $this->assertBothBackends('var m = /\\d+/.exec("abc123"); m.index', 3);
     }
 
     public function testExecNoMatch(): void
     {
-        $result = $this->engine->eval('/\\d+/.exec("hello")');
-        self::assertNull($result);
+        $this->assertBothBackends('/\\d+/.exec("hello")', null);
     }
 
     // ═══════════════════ String.match() ═══════════════════
@@ -119,119 +108,112 @@ final class RegexTest extends TestCase
 
     public function testStringMatchGlobal(): void
     {
-        $result = $this->engine->eval('"abc123def456".match(/\\d+/g)');
-        self::assertSame(['123', '456'], $result);
+        $this->assertBothBackends('"abc123def456".match(/\\d+/g)', ['123', '456']);
     }
 
     public function testStringMatchNoMatch(): void
     {
-        $result = $this->engine->eval('"hello".match(/\\d+/)');
-        self::assertNull($result);
+        $this->assertBothBackends('"hello".match(/\\d+/)', null);
     }
 
     // ═══════════════════ String.search() ═══════════════════
 
     public function testStringSearch(): void
     {
-        self::assertSame(3, $this->engine->eval('"abc123".search(/\\d+/)'));
+        $this->assertBothBackends('"abc123".search(/\\d+/)', 3);
     }
 
     public function testStringSearchNotFound(): void
     {
-        self::assertSame(-1, $this->engine->eval('"hello".search(/\\d+/)'));
+        $this->assertBothBackends('"hello".search(/\\d+/)', -1);
     }
 
     // ═══════════════════ String.replace() with regex ═══════════════════
 
     public function testStringReplaceRegex(): void
     {
-        self::assertSame('abcXdef', $this->engine->eval('"abc123def".replace(/\\d+/, "X")'));
+        $this->assertBothBackends('"abc123def".replace(/\\d+/, "X")', 'abcXdef');
     }
 
     public function testStringReplaceRegexGlobal(): void
     {
-        self::assertSame('abcXdefX', $this->engine->eval('"abc123def456".replace(/\\d+/g, "X")'));
+        $this->assertBothBackends('"abc123def456".replace(/\\d+/g, "X")', 'abcXdefX');
     }
 
     public function testStringReplaceRegexFirstOnly(): void
     {
         // Without g flag, only first match is replaced
-        self::assertSame('abcXdef456', $this->engine->eval('"abc123def456".replace(/\\d+/, "X")'));
+        $this->assertBothBackends('"abc123def456".replace(/\\d+/, "X")', 'abcXdef456');
     }
 
     // ═══════════════════ String.split() with regex ═══════════════════
 
     public function testStringSplitRegex(): void
     {
-        $result = $this->engine->eval('"a1b2c3".split(/\\d/)');
-        self::assertSame(['a', 'b', 'c', ''], $result);
+        $this->assertBothBackends('"a1b2c3".split(/\\d/)', ['a', 'b', 'c', '']);
     }
 
     public function testStringSplitRegexMultiChar(): void
     {
-        $result = $this->engine->eval('"hello   world  foo".split(/\\s+/)');
-        self::assertSame(['hello', 'world', 'foo'], $result);
+        $this->assertBothBackends('"hello   world  foo".split(/\\s+/)', ['hello', 'world', 'foo']);
     }
 
     // ═══════════════════ String.matchAll() ═══════════════════
 
     public function testStringMatchAll(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var matches = "test1 test2".matchAll(/test(\\d)/g);
             matches.length;
-        ');
-        self::assertSame(2, $result);
+        ', 2);
     }
 
     public function testStringMatchAllEntries(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var matches = "a1b2".matchAll(/[a-z](\\d)/g);
             matches[0][0];
-        ');
-        self::assertSame('a1', $result);
+        ', 'a1');
     }
 
     // ═══════════════════ Regex in expressions ═══════════════════
 
     public function testRegexAfterEqual(): void
     {
-        self::assertTrue($this->engine->eval('var r = /abc/; r.test("abc")'));
+        $this->assertBothBackends('var r = /abc/; r.test("abc")', true);
     }
 
     public function testRegexAfterReturn(): void
     {
-        self::assertTrue($this->engine->eval('
+        $this->assertBothBackends('
             function getPattern() { return /\\d+/; }
             getPattern().test("123");
-        '));
+        ', true);
     }
 
     public function testRegexInCondition(): void
     {
-        self::assertSame('yes', $this->engine->eval('
+        $this->assertBothBackends('
             /\\d+/.test("abc123") ? "yes" : "no"
-        '));
+        ', 'yes');
     }
 
     public function testDivisionStillWorks(): void
     {
         // After a number/identifier, `/` should be division, not regex
-        self::assertSame(5, $this->engine->eval('10 / 2'));
-        self::assertSame(3, $this->engine->eval('var x = 9; x / 3'));
+        $this->assertBothBackends('10 / 2', 5);
+        $this->assertBothBackends('var x = 9; x / 3', 3);
     }
 
     // ═══════════════════ Existing tests still pass ═══════════════════
 
     public function testStringReplaceStringStillWorks(): void
     {
-        self::assertSame('hxllo', $this->engine->eval('"hello".replace("e", "x")'));
+        $this->assertBothBackends('"hello".replace("e", "x")', 'hxllo');
     }
 
     public function testStringSplitStringStillWorks(): void
     {
-        $result = $this->engine->eval('"a,b,c".split(",")');
-        self::assertSame(['a', 'b', 'c'], $result);
+        $this->assertBothBackends('"a,b,c".split(",")', ['a', 'b', 'c']);
     }
 }

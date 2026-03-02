@@ -4,17 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class ScopingTest extends TestCase
+class ScopingTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Block Scoping (let/const) ═══════════════════
 
@@ -46,13 +37,12 @@ final class ScopingTest extends TestCase
     public function testVarLeaksThroughBlock(): void
     {
         // var should still be visible outside the block (function-scoped)
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             if (true) {
                 var x = 42;
             }
             x;
-        ');
-        self::assertSame(42, $result);
+        ', 42);
     }
 
     public function testLetInForLoopIsScoped(): void
@@ -72,29 +62,27 @@ final class ScopingTest extends TestCase
     public function testVarInForLoopLeaks(): void
     {
         // var in for-loop should still be visible after
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             for (var i = 0; i < 5; i = i + 1) {}
             i;
-        ');
-        self::assertSame(5, $result);
+        ', 5);
     }
 
     public function testLetShadowingInBlock(): void
     {
         // let in inner block can shadow outer variable
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             let x = 1;
             if (true) {
                 let x = 2;
             }
             x;
-        ');
-        self::assertSame(1, $result);
+        ', 1);
     }
 
     public function testLetInNestedBlocks(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             let result = 0;
             if (true) {
                 let a = 10;
@@ -104,20 +92,18 @@ final class ScopingTest extends TestCase
                 }
             }
             result;
-        ');
-        self::assertSame(30, $result);
+        ', 30);
     }
 
     public function testForLoopLetAccumulation(): void
     {
         // for-loop with let should still work correctly for the loop body
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var sum = 0;
             for (let i = 0; i < 10; i = i + 1) {
                 sum = sum + i;
             }
             sum;
-        ');
-        self::assertSame(45, $result);
+        ', 45);
     }
 }

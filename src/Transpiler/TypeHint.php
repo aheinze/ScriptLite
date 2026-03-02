@@ -16,5 +16,6 @@ enum TypeHint
     case String;    // string — + means concat
     case Bool;      // boolean
     case Array_;    // array (known)
+    case Object_;   // plain JS object literal (boxed JSObject, no prototype walk needed)
     case Unknown;   // need the runtime guard
 }

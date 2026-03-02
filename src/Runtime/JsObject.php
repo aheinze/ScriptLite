@@ -26,6 +26,9 @@ final class JsObject
         $this->constructor = $constructor;
     }
 
+    /** @var array<string, NativeFunction> Cached method wrappers */
+    private array $methodCache = [];
+
     /**
      * Get a property by key.
      *
@@ -35,9 +38,14 @@ final class JsObject
     {
         $k = (string) $key;
 
-        // Method lookup
-        $method = $this->getMethod($k, $invoker);
+        // Method lookup — cached
+        if (isset($this->methodCache[$k])) {
+            return $this->methodCache[$k];
+        }
+
+        $method = $this->buildMethod($k);
         if ($method !== null) {
+            $this->methodCache[$k] = $method;
             return $method;
         }
 
@@ -56,7 +64,7 @@ final class JsObject
         $this->properties[(string) $key] = $value;
     }
 
-    private function getMethod(string $name, ?\Closure $invoker = null): ?NativeFunction
+    private function buildMethod(string $name): ?NativeFunction
     {
         return match ($name) {
             'hasOwnProperty' => new NativeFunction('hasOwnProperty', function (mixed $key) {

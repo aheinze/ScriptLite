@@ -4,29 +4,20 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class ControlFlowTest extends TestCase
+class ControlFlowTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Control Flow ═══════════════════
 
     public function testIfElse(): void
     {
-        self::assertSame(1, $this->engine->eval('var r = 0; if (true) { r = 1; } else { r = 2; } r'));
-        self::assertSame(2, $this->engine->eval('var r = 0; if (false) { r = 1; } else { r = 2; } r'));
+        $this->assertBothBackends('var r = 0; if (true) { r = 1; } else { r = 2; } r', 1);
+        $this->assertBothBackends('var r = 0; if (false) { r = 1; } else { r = 2; } r', 2);
     }
 
     public function testWhileLoop(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var sum = 0;
             var i = 1;
             while (i <= 100) {
@@ -34,39 +25,36 @@ final class ControlFlowTest extends TestCase
                 i = i + 1;
             }
             sum;
-        ');
-        self::assertSame(5050, $result);
+        ', 5050);
     }
 
     public function testForLoop(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var sum = 0;
             for (var i = 0; i < 10; i = i + 1) {
                 sum = sum + i;
             }
             sum;
-        ');
-        self::assertSame(45, $result);
+        ', 45);
     }
 
     // ═══════════════════ Fibonacci (Integration) ═══════════════════
 
     public function testFibonacciRecursive(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function fib(n) {
                 if (n <= 1) { return n; }
                 return fib(n - 1) + fib(n - 2);
             }
             fib(10);
-        ');
-        self::assertSame(55, $result);
+        ', 55);
     }
 
     public function testFibonacciIterative(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function fib(n) {
                 if (n <= 1) { return n; }
                 var a = 0;
@@ -79,13 +67,12 @@ final class ControlFlowTest extends TestCase
                 return b;
             }
             fib(20);
-        ');
-        self::assertSame(6765, $result);
+        ', 6765);
     }
 
     public function testFibonacciWithClosure(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function memoFib() {
                 var cache_0 = 0;
                 var cache_1 = 1;
@@ -118,7 +105,6 @@ final class ControlFlowTest extends TestCase
 
             var fib = memoFib();
             fib(10);
-        ');
-        self::assertSame(55, $result);
+        ', 55);
     }
 }

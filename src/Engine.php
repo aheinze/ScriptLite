@@ -8,8 +8,10 @@ use ScriptLite\Ast\Parser;
 use ScriptLite\Compiler\Compiler;
 use ScriptLite\Compiler\CompiledScript;
 use ScriptLite\Runtime\Environment;
-use ScriptLite\Transpiler\PhpTranspiler;
 use ScriptLite\Runtime\PhpObjectProxy;
+use ScriptLite\Transpiler\PhpTranspiler;
+use ScriptLite\Transpiler\Runtime\JSFunction as TrJsFunction;
+use ScriptLite\Transpiler\Runtime\JSObject as TrJsObject;
 use ScriptLite\Vm\VirtualMachine;
 
 /**
@@ -136,7 +138,18 @@ final class Engine
     public function evalTranspiled(string $phpSource, array $globals = []): mixed
     {
         $__globals = self::normalizeGlobals($globals);
-        return eval($phpSource);
+        set_error_handler(static function (int $errno, string $msg): bool {
+            if (str_contains($msg, 'Undefined variable')) {
+                preg_match('/\$(\w+)/', $msg, $m);
+                throw new \RuntimeException(($m[1] ?? '?') . ' is not defined');
+            }
+            return false; // let other warnings propagate normally
+        }, E_WARNING);
+        try {
+            return self::denormalizeValue(eval($phpSource));
+        } finally {
+            restore_error_handler();
+        }
     }
 
     /**
@@ -151,10 +164,18 @@ final class Engine
     {
         $file = tempnam(sys_get_temp_dir(), 'scriptlite_') . '.php';
         file_put_contents($file, "<?php\n" . $phpSource);
+        set_error_handler(static function (int $errno, string $msg): bool {
+            if (str_contains($msg, 'Undefined variable')) {
+                preg_match('/\$(\w+)/', $msg, $m);
+                throw new \RuntimeException(($m[1] ?? '?') . ' is not defined');
+            }
+            return false; // let other warnings propagate normally
+        }, E_WARNING);
         try {
             $__globals = self::normalizeGlobals($globals);
-            return include $file;
+            return self::denormalizeValue(include $file);
         } finally {
+            restore_error_handler();
             @unlink($file);
         }
     }
@@ -212,6 +233,33 @@ final class Engine
                 $value[$k] = self::normalizeValue($v);
             }
         }
+        return $value;
+    }
+
+    private static function denormalizeValue(mixed $value): mixed
+    {
+        if ($value instanceof TrJsObject) {
+            $result = [];
+            foreach ($value->toArray() as $key => $item) {
+                $result[$key] = self::denormalizeValue($item);
+            }
+            return $result;
+        }
+
+        if ($value instanceof TrJsFunction) {
+            return static fn(mixed ...$args): mixed => $value(...$args);
+        }
+
+        if ($value instanceof PhpObjectProxy) {
+            return $value->target;
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $key => $item) {
+                $value[$key] = self::denormalizeValue($item);
+            }
+        }
+
         return $value;
     }
 }

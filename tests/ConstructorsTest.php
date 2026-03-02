@@ -4,121 +4,116 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class ConstructorsTest extends TestCase
+class ConstructorsTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ new, this, and Constructors ═══════════════════
 
     public function testNewWithConstructorFunction(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Person(name, age) {
                 this.name = name;
                 this.age = age;
             }
             var p = new Person("Alice", 30);
             p.name;
-        ');
-        self::assertSame('Alice', $result);
+        ', 'Alice');
     }
 
     public function testNewReturnsObject(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Point(x, y) {
                 this.x = x;
                 this.y = y;
             }
             var p = new Point(3, 4);
             p.x + p.y;
-        ');
-        self::assertSame(7, $result);
+        ', 7);
     }
 
     public function testNewTypeofObject(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Foo() {
                 this.val = 1;
             }
             typeof new Foo();
-        ');
-        self::assertSame('object', $result);
+        ', 'object');
     }
 
     public function testNewConstructorReturnsThisImplicitly(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Box(w, h) {
                 this.width = w;
                 this.height = h;
             }
             var b = new Box(10, 20);
             b.width * b.height;
-        ');
-        self::assertSame(200, $result);
+        ', 200);
     }
 
     public function testNewConstructorExplicitReturnPrimitive(): void
     {
         // If constructor returns a primitive, `new` should still return `this`
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Thing(v) {
                 this.val = v;
                 return 42;
             }
             var t = new Thing(99);
             t.val;
-        ');
-        self::assertSame(99, $result);
+        ', 99);
     }
 
     public function testNewConstructorExplicitReturnObject(): void
     {
         // If constructor returns an object, `new` should return that object
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Maker() {
                 this.a = 1;
                 return {b: 2};
             }
             var m = new Maker();
             m.b;
-        ');
-        self::assertSame(2, $result);
+        ', 2);
     }
 
     public function testNewWithoutArguments(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Counter() {
                 this.count = 0;
             }
             var c = new Counter;
             c.count;
-        ');
-        self::assertSame(0, $result);
+        ', 0);
     }
 
     public function testNewMultipleInstances(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             function Dog(name) {
                 this.name = name;
             }
             var a = new Dog("Rex");
             var b = new Dog("Max");
             a.name + " " + b.name;
-        ');
-        self::assertSame('Rex Max', $result);
+        ', 'Rex Max');
+    }
+
+    public function testPrototypeMethodLookupOnConstructedObject(): void
+    {
+        self::assertSame('woof', $this->engine->transpileAndEval('
+            function Dog() {}
+            Dog.prototype.bark = function() {
+                return "woof";
+            };
+            var d = new Dog();
+            d.bark();
+        '));
     }
 
     // ═══════════════════ Date Object ═══════════════════
@@ -133,134 +128,117 @@ final class ConstructorsTest extends TestCase
 
     public function testNewDateNoArgs(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date();
             typeof d;
-        ');
-        self::assertSame('object', $result);
+        ', 'object');
     }
 
     public function testNewDateGetTime(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date();
             var t = d.getTime();
             typeof t;
-        ');
-        self::assertSame('number', $result);
+        ', 'number');
     }
 
     public function testNewDateFromTimestamp(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(0);
             d.getTime();
-        ');
-        self::assertSame(0, $result);
+        ', 0);
     }
 
     public function testDateGetFullYear(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.getFullYear();
-        ');
-        // 1704067200000 = 2024-01-01T00:00:00Z
-        self::assertSame(2024, $result);
+        ', 2024);
     }
 
     public function testDateGetMonth(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.getMonth();
-        ');
-        // January = 0
-        self::assertSame(0, $result);
+        ', 0);
     }
 
     public function testDateGetDate(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.getDate();
-        ');
-        self::assertSame(1, $result);
+        ', 1);
     }
 
     public function testDateGetDay(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.getDay();
-        ');
-        // 2024-01-01 is a Monday = 1
-        self::assertSame(1, $result);
+        ', 1);
     }
 
     public function testDateGetHoursMinutesSeconds(): void
     {
         // 1704070800000 = 2024-01-01T01:00:00Z
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704070800000);
             d.getHours() + ":" + d.getMinutes() + ":" + d.getSeconds();
-        ');
-        self::assertSame('1:0:0', $result);
+        ', '1:0:0');
     }
 
     public function testDateGetMilliseconds(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200123);
             d.getMilliseconds();
-        ');
-        self::assertSame(123, $result);
+        ', 123);
     }
 
     public function testDateToISOString(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.toISOString();
-        ');
-        self::assertSame('2024-01-01T00:00:00.000Z', $result);
+        ', '2024-01-01T00:00:00.000Z');
     }
 
     public function testDateToISOStringWithMs(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200456);
             d.toISOString();
-        ');
-        self::assertSame('2024-01-01T00:00:00.456Z', $result);
+        ', '2024-01-01T00:00:00.456Z');
     }
 
     public function testDateValueOf(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.valueOf();
-        ');
-        self::assertSame(1704067200000, $result);
+        ', 1704067200000);
     }
 
     public function testDateSetTime(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(0);
             d.setTime(1704067200000);
             d.getFullYear();
-        ');
-        self::assertSame(2024, $result);
+        ', 2024);
     }
 
     public function testDateFromYearMonth(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(2024, 0, 15);
             d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
-        ');
-        self::assertSame('2024-0-15', $result);
+        ', '2024-0-15');
     }
 
     public function testDateParse(): void
@@ -283,12 +261,10 @@ final class ConstructorsTest extends TestCase
 
     public function testDateToLocaleDateString(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var d = new Date(1704067200000);
             d.toLocaleDateString();
-        ');
-        // 2024-01-01 → "1/1/2024"
-        self::assertSame('1/1/2024', $result);
+        ', '1/1/2024');
     }
 
     public function testDateStringCoercion(): void
@@ -303,7 +279,6 @@ final class ConstructorsTest extends TestCase
     public function testDateMethodChaining(): void
     {
         // Creating date and calling method in one expression
-        $result = $this->engine->eval('new Date(0).getTime()');
-        self::assertSame(0, $result);
+        $this->assertBothBackends('new Date(0).getTime()', 0);
     }
 }

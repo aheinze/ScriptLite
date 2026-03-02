@@ -4,85 +4,76 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class NumberObjectTest extends TestCase
+class NumberObjectTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Number.isInteger ═══════════════════
 
     public function testNumberIsInteger(): void
     {
-        self::assertTrue($this->engine->eval('Number.isInteger(5)'));
-        self::assertTrue($this->engine->eval('Number.isInteger(0)'));
-        self::assertTrue($this->engine->eval('Number.isInteger(-3)'));
+        $this->assertBothBackends('Number.isInteger(5)', true);
+        $this->assertBothBackends('Number.isInteger(0)', true);
+        $this->assertBothBackends('Number.isInteger(-3)', true);
     }
 
     public function testNumberIsIntegerFalse(): void
     {
-        self::assertFalse($this->engine->eval('Number.isInteger(3.5)'));
-        self::assertFalse($this->engine->eval('Number.isInteger("5")'));
-        self::assertFalse($this->engine->eval('Number.isInteger(true)'));
-        self::assertFalse($this->engine->eval('Number.isInteger(null)'));
+        $this->assertBothBackends('Number.isInteger(3.5)', false);
+        $this->assertBothBackends('Number.isInteger("5")', false);
+        $this->assertBothBackends('Number.isInteger(true)', false);
+        $this->assertBothBackends('Number.isInteger(null)', false);
     }
 
     // ═══════════════════ Number.isFinite ═══════════════════
 
     public function testNumberIsFinite(): void
     {
-        self::assertTrue($this->engine->eval('Number.isFinite(42)'));
-        self::assertTrue($this->engine->eval('Number.isFinite(0)'));
-        self::assertTrue($this->engine->eval('Number.isFinite(-99.5)'));
+        $this->assertBothBackends('Number.isFinite(42)', true);
+        $this->assertBothBackends('Number.isFinite(0)', true);
+        $this->assertBothBackends('Number.isFinite(-99.5)', true);
     }
 
     public function testNumberIsFiniteFalse(): void
     {
-        self::assertFalse($this->engine->eval('Number.isFinite(1/0)'));
-        self::assertFalse($this->engine->eval('Number.isFinite("42")'));
-        self::assertFalse($this->engine->eval('Number.isFinite(null)'));
+        $this->assertBothBackends('Number.isFinite(1/0)', false);
+        $this->assertBothBackends('Number.isFinite("42")', false);
+        $this->assertBothBackends('Number.isFinite(null)', false);
     }
 
     // ═══════════════════ Number.isNaN ═══════════════════
 
     public function testNumberIsNaN(): void
     {
-        self::assertTrue($this->engine->eval('Number.isNaN(0/0)'));
+        $this->assertBothBackends('Number.isNaN(0/0)', true);
     }
 
     public function testNumberIsNaNStrict(): void
     {
         // Number.isNaN does NOT coerce — unlike global isNaN
-        self::assertFalse($this->engine->eval('Number.isNaN("hello")'));
-        self::assertFalse($this->engine->eval('Number.isNaN(undefined)'));
-        self::assertFalse($this->engine->eval('Number.isNaN(42)'));
+        $this->assertBothBackends('Number.isNaN("hello")', false);
+        $this->assertBothBackends('Number.isNaN(undefined)', false);
+        $this->assertBothBackends('Number.isNaN(42)', false);
     }
 
     // ═══════════════════ Number.parseInt / Number.parseFloat ═══════════════════
 
     public function testNumberParseInt(): void
     {
-        self::assertSame(42, $this->engine->eval('Number.parseInt("42")'));
-        self::assertSame(42, $this->engine->eval('Number.parseInt("42.9")'));
-        self::assertSame(-10, $this->engine->eval('Number.parseInt("-10")'));
+        $this->assertBothBackends('Number.parseInt("42")', 42);
+        $this->assertBothBackends('Number.parseInt("42.9")', 42);
+        $this->assertBothBackends('Number.parseInt("-10")', -10);
     }
 
     public function testNumberParseIntRadix(): void
     {
-        self::assertSame(255, $this->engine->eval('Number.parseInt("ff", 16)'));
-        self::assertSame(7, $this->engine->eval('Number.parseInt("111", 2)'));
-        self::assertSame(8, $this->engine->eval('Number.parseInt("10", 8)'));
+        $this->assertBothBackends('Number.parseInt("ff", 16)', 255);
+        $this->assertBothBackends('Number.parseInt("111", 2)', 7);
+        $this->assertBothBackends('Number.parseInt("10", 8)', 8);
     }
 
     public function testNumberParseIntHexPrefix(): void
     {
-        self::assertSame(255, $this->engine->eval('Number.parseInt("0xff", 16)'));
+        $this->assertBothBackends('Number.parseInt("0xff", 16)', 255);
     }
 
     public function testNumberParseIntNaN(): void
@@ -93,14 +84,14 @@ final class NumberObjectTest extends TestCase
 
     public function testNumberParseFloat(): void
     {
-        self::assertSame(3.14, $this->engine->eval('Number.parseFloat("3.14")'));
-        self::assertSame(42, $this->engine->eval('Number.parseFloat("42")'));
+        $this->assertBothBackends('Number.parseFloat("3.14")', 3.14);
+        $this->assertBothBackends('Number.parseFloat("42")', 42);
     }
 
     public function testNumberParseFloatLeadingText(): void
     {
         // parseFloat extracts leading number
-        self::assertSame(3.14, $this->engine->eval('Number.parseFloat("3.14abc")'));
+        $this->assertBothBackends('Number.parseFloat("3.14abc")', 3.14);
     }
 
     public function testNumberParseFloatNaN(): void
@@ -113,12 +104,12 @@ final class NumberObjectTest extends TestCase
 
     public function testNumberMaxSafeInteger(): void
     {
-        self::assertSame(9007199254740991, $this->engine->eval('Number.MAX_SAFE_INTEGER'));
+        $this->assertBothBackends('Number.MAX_SAFE_INTEGER', 9007199254740991);
     }
 
     public function testNumberMinSafeInteger(): void
     {
-        self::assertSame(-9007199254740991, $this->engine->eval('Number.MIN_SAFE_INTEGER'));
+        $this->assertBothBackends('Number.MIN_SAFE_INTEGER', -9007199254740991);
     }
 
     public function testNumberEpsilon(): void
@@ -130,12 +121,12 @@ final class NumberObjectTest extends TestCase
 
     public function testNumberPositiveInfinity(): void
     {
-        self::assertSame(INF, $this->engine->eval('Number.POSITIVE_INFINITY'));
+        $this->assertBothBackends('Number.POSITIVE_INFINITY', INF);
     }
 
     public function testNumberNegativeInfinity(): void
     {
-        self::assertSame(-INF, $this->engine->eval('Number.NEGATIVE_INFINITY'));
+        $this->assertBothBackends('Number.NEGATIVE_INFINITY', -INF);
     }
 
     public function testNumberNaN(): void
@@ -147,13 +138,13 @@ final class NumberObjectTest extends TestCase
 
     public function testGlobalParseInt(): void
     {
-        self::assertSame(42, $this->engine->eval('parseInt("42")'));
-        self::assertSame(255, $this->engine->eval('parseInt("ff", 16)'));
+        $this->assertBothBackends('parseInt("42")', 42);
+        $this->assertBothBackends('parseInt("ff", 16)', 255);
     }
 
     public function testGlobalParseFloat(): void
     {
-        self::assertSame(3.14, $this->engine->eval('parseFloat("3.14")'));
+        $this->assertBothBackends('parseFloat("3.14")', 3.14);
     }
 
     // ═══════════════════ Global isNaN / isFinite ═══════════════════
@@ -161,17 +152,18 @@ final class NumberObjectTest extends TestCase
     public function testGlobalIsNaN(): void
     {
         // Global isNaN coerces to number first
-        self::assertTrue($this->engine->eval('isNaN("hello")'));
-        self::assertTrue($this->engine->eval('isNaN(undefined)'));
-        self::assertFalse($this->engine->eval('isNaN(42)'));
-        self::assertFalse($this->engine->eval('isNaN("42")'));
+        $this->assertBothBackends('isNaN("hello")', true);
+        // VM-only: transpiler maps undefined to null, Ops::toNumber(null)=0 not NAN
+        $this->assertVm('isNaN(undefined)', true);
+        $this->assertBothBackends('isNaN(42)', false);
+        $this->assertBothBackends('isNaN("42")', false);
     }
 
     public function testGlobalIsFinite(): void
     {
-        self::assertTrue($this->engine->eval('isFinite(42)'));
-        self::assertTrue($this->engine->eval('isFinite("42")'));
-        self::assertFalse($this->engine->eval('isFinite(1/0)'));
-        self::assertFalse($this->engine->eval('isFinite("hello")'));
+        $this->assertBothBackends('isFinite(42)', true);
+        $this->assertBothBackends('isFinite("42")', true);
+        $this->assertBothBackends('isFinite(1/0)', false);
+        $this->assertBothBackends('isFinite("hello")', false);
     }
 }

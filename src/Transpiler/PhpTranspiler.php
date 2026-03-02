@@ -6,7 +6,8 @@ namespace ScriptLite\Transpiler;
 
 use ScriptLite\Ast\{
     ArrayLiteral, AssignExpr, BinaryExpr, BlockStmt, BooleanLiteral, BreakStmt, CallExpr,
-    ConditionalExpr, ContinueStmt, DeleteExpr, DoWhileStmt, ExpressionStmt, Expr, ForStmt,
+    ConditionalExpr, ContinueStmt, DestructuringDeclaration, DeleteExpr, DoWhileStmt,
+    ExpressionStmt, Expr, ForInStmt, ForOfStmt, ForStmt,
     FunctionDeclaration, FunctionExpr,
     Identifier, IfStmt, LogicalExpr, MemberAssignExpr, MemberExpr, NewExpr, NullLiteral,
     NumberLiteral, ObjectLiteral, Program, RegexLiteral, ReturnStmt, SpreadElement, Stmt, StringLiteral,
@@ -25,6 +26,10 @@ use RuntimeException;
  */
 final class PhpTranspiler
 {
+    private const OPS = '\\ScriptLite\\Transpiler\\Runtime\\Ops';
+    private const JS_FUNCTION = '\\ScriptLite\\Transpiler\\Runtime\\JSFunction';
+    private const JS_OBJECT = '\\ScriptLite\\Transpiler\\Runtime\\JSObject';
+
     private int $tmpId = 0;
 
     /** @var list<array<string, true>> scope stack: each frame is set of variable names */
@@ -34,6 +39,15 @@ final class PhpTranspiler
 
     /** @var array<string, TypeHint> tracked variable types for optimization */
     private array $varTypes = [];
+
+    /** Current lexical block nesting depth for let/const shadowing decisions. */
+    private int $blockDepth = 0;
+
+    /** @var array<string, true> function bindings that need JSFunction boxing */
+    private array $boxedFunctionBindings = [];
+
+    /** @var array<string, array<string, true>> aliases: target name -> possible source names */
+    private array $functionBindingAliases = [];
 
     /**
      * Transpile a parsed JS program to executable PHP source.
@@ -47,6 +61,11 @@ final class PhpTranspiler
         $this->scopes = [];
         $this->tmpId = 0;
         $this->varTypes = [];
+        $this->letRenames = [];
+        $this->blockDepth = 0;
+        $this->boxedFunctionBindings = [];
+        $this->functionBindingAliases = [];
+        $this->collectBoxedFunctionBindings($program->body);
 
         $this->pushScope([]);
         foreach ($globalNames as $name) {
@@ -87,18 +106,34 @@ final class PhpTranspiler
         return "return (static function(array \$__g = []) {\n    extract(\$__g);\n" . $this->indent($body) . "})(\$__globals ?? []);\n";
     }
 
+    /**
+     * Emit an expression in boolean context using JS truthiness semantics.
+     * Skips the wrapper when the type is already known to be boolean.
+     */
+    private function emitCondition(Expr $e): string
+    {
+        if ($this->inferType($e) === TypeHint::Bool) {
+            return $this->emitExpr($e);
+        }
+        return self::OPS . '::toBoolean(' . $this->emitExpr($e) . ')';
+    }
+
     // ───────────────── Statements ─────────────────
 
     private function emitStmt(Stmt $stmt): string
     {
         return match (true) {
-            $stmt instanceof ExpressionStmt => $this->emitExpr($stmt->expression) . ";\n",
+            $stmt instanceof ExpressionStmt => ($stmt->expression instanceof UpdateExpr
+                ? $this->emitUpdateVoid($stmt->expression) : $this->emitExpr($stmt->expression)) . ";\n",
             $stmt instanceof VarDeclaration => $this->emitVarDecl($stmt),
             $stmt instanceof FunctionDeclaration => $this->emitFuncDecl($stmt),
             $stmt instanceof ReturnStmt => $this->emitReturn($stmt),
             $stmt instanceof IfStmt => $this->emitIf($stmt),
             $stmt instanceof WhileStmt => $this->emitWhile($stmt),
             $stmt instanceof ForStmt => $this->emitFor($stmt),
+            $stmt instanceof ForOfStmt => $this->emitForOf($stmt),
+            $stmt instanceof ForInStmt => $this->emitForIn($stmt),
+            $stmt instanceof DestructuringDeclaration => $this->emitDestructuring($stmt),
             $stmt instanceof DoWhileStmt => $this->emitDoWhile($stmt),
             $stmt instanceof BreakStmt => "break;\n",
             $stmt instanceof ContinueStmt => "continue;\n",
@@ -110,30 +145,53 @@ final class PhpTranspiler
         };
     }
 
+    /** @var array<string, string> let/const rename map: original name → current PHP name */
+    private array $letRenames = [];
+
     private function emitVarDecl(VarDeclaration $d): string
     {
-        $this->addVar($d->name);
+        $phpName = $d->name;
+
+        // let/const block-scoping: rename bindings introduced in nested lexical
+        // blocks, or when they shadow an already-active lexical binding.
+        if ($d->kind !== VarKind::Var) {
+            if ($this->blockDepth > 0 || array_key_exists($d->name, $this->letRenames)) {
+                $phpName = $d->name . '__' . $this->tmpId++;
+            }
+            $this->letRenames[$d->name] = $phpName;
+        }
+
+        $this->addVar($phpName);
         if ($d->initializer !== null) {
-            $this->trackVar($d->name, $this->inferType($d->initializer));
-            $val = $this->emitExpr($d->initializer);
+            $initializer = $d->initializer;
+            $this->trackVar($phpName, $this->inferType($initializer));
+            $val = $initializer instanceof FunctionExpr
+                ? $this->emitFunctionExpr($initializer, $d->name)
+                : $this->emitExpr($initializer);
         } else {
             $val = 'null';
         }
-        return '$' . $d->name . ' = ' . $val . ";\n";
+        return '$' . $phpName . ' = ' . $val . ";\n";
     }
 
     private function emitFuncDecl(FunctionDeclaration $d): string
     {
         $this->addVar($d->name);
-        return '$' . $d->name . ' = ' . $this->emitClosure($d->name, $d->params, $d->body, restParam: $d->restParam) . ";\n";
+        return '$' . $d->name . ' = ' . $this->emitClosure(
+            $d->name,
+            $d->params,
+            $d->body,
+            restParam: $d->restParam,
+            boxFunction: $this->needsBoxedFunction($d->name, false, $d->body)
+        ) . ";\n";
     }
 
     private function emitReturn(ReturnStmt $s): string
     {
         if ($this->inConstructor) {
             $val = $s->value !== null ? $this->emitExpr($s->value) : 'null';
-            // Constructor: if return value is not array/object, return $__this
-            return "{ \$__rv = {$val}; return is_array(\$__rv) ? \$__rv : \$__this; }\n";
+            // Constructor: if return value is not an object, return the constructed instance.
+            return '{ $__rv = ' . $val . '; return ' . self::OPS . '::isObjectLike($__rv) ? $__rv : $__this; }' . "\n";
         }
         return 'return ' . ($s->value !== null ? $this->emitExpr($s->value) : 'null') . ";\n";
     }
@@ -141,7 +199,7 @@ final class PhpTranspiler
     private function emitIf(IfStmt $s): string
     {
         $saved = $this->varTypes;
-        $out = 'if (' . $this->emitExpr($s->condition) . ") {\n";
+        $out = 'if (' . $this->emitCondition($s->condition) . ") {\n";
         $out .= $this->indent($this->emitStmt($s->consequent));
         $out .= '}';
         $afterThen = $this->varTypes;
@@ -164,7 +222,7 @@ final class PhpTranspiler
     private function emitWhile(WhileStmt $s): string
     {
         $saved = $this->varTypes;
-        $out = "while (" . $this->emitExpr($s->condition) . ") {\n"
+        $out = "while (" . $this->emitCondition($s->condition) . ") {\n"
             . $this->indent($this->emitStmt($s->body))
             . "}\n";
         $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
@@ -186,7 +244,9 @@ final class PhpTranspiler
         }
 
         $cond = $s->condition !== null ? $this->emitExpr($s->condition) : '';
-        $upd = $s->update !== null ? $this->emitExpr($s->update) : '';
+        $upd = $s->update !== null
+            ? ($s->update instanceof UpdateExpr ? $this->emitUpdateVoid($s->update) : $this->emitExpr($s->update))
+            : '';
 
         $saved = $this->varTypes;
         $out = "for ({$init}; {$cond}; {$upd}) {\n"
@@ -196,12 +256,81 @@ final class PhpTranspiler
         return $out;
     }
 
+    private function emitForOf(ForOfStmt $s): string
+    {
+        $this->addVar($s->name);
+        $saved = $this->varTypes;
+        $iter = $this->emitExpr($s->iterable);
+        $out = "foreach ({$iter} as \${$s->name}) {\n"
+            . $this->indent($this->emitStmt($s->body))
+            . "}\n";
+        $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
+        return $out;
+    }
+
+    private function emitForIn(ForInStmt $s): string
+    {
+        $this->addVar($s->name);
+        $saved = $this->varTypes;
+        $obj = $this->emitExpr($s->object);
+        $this->trackVar($s->name, TypeHint::String);
+        $out = 'foreach (' . self::OPS . "::forInKeys({$obj}) as \${$s->name}) {\n"
+            . $this->indent($this->emitStmt($s->body))
+            . "}\n";
+        $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
+        return $out;
+    }
+
+    private function emitDestructuring(DestructuringDeclaration $d): string
+    {
+        $tmp = '$__d' . ($this->tmpId++);
+        $out = "{$tmp} = " . $this->emitExpr($d->initializer) . ";\n";
+        $sourceType = $this->inferType($d->initializer);
+
+        foreach ($d->bindings as $b) {
+            $this->addVar($b['name']);
+            if ($d->isArray) {
+                $key = $b['source'];
+            } else {
+                $key = var_export($b['source'], true);
+            }
+            if ($b['default'] !== null) {
+                $def = $this->emitExpr($b['default']);
+                if ($d->isArray) {
+                    $value = "{$tmp}[{$key}]";
+                    $out .= '$' . $b['name'] . ' = ' . self::OPS . "::hasOwn({$tmp}, {$key}) ? {$value} : {$def};\n";
+                } elseif ($sourceType === TypeHint::Object_) {
+                    $value = "({$tmp}->properties[{$key}] ?? null)";
+                    $out .= '$' . $b['name'] . " = array_key_exists({$key}, {$tmp}->properties) ? {$value} : {$def};\n";
+                } else {
+                    $value = "{$tmp}[{$key}]";
+                    $out .= '$' . $b['name'] . ' = ' . self::OPS . "::hasOwn({$tmp}, {$key}) ? {$value} : {$def};\n";
+                }
+            } else {
+                if ($d->isArray) {
+                    $out .= '$' . $b['name'] . " = {$tmp}[{$key}] ?? null;\n";
+                } elseif ($sourceType === TypeHint::Object_) {
+                    $out .= '$' . $b['name'] . " = {$tmp}->properties[{$key}] ?? null;\n";
+                } else {
+                    $out .= '$' . $b['name'] . " = {$tmp}[{$key}] ?? null;\n";
+                }
+            }
+        }
+
+        if ($d->restName !== null && $d->isArray) {
+            $this->addVar($d->restName);
+            $out .= '$' . $d->restName . " = array_slice({$tmp}, " . count($d->bindings) . ");\n";
+        }
+
+        return $out;
+    }
+
     private function emitDoWhile(DoWhileStmt $s): string
     {
         $saved = $this->varTypes;
         $out = "do {\n"
             . $this->indent($this->emitStmt($s->body))
-            . "} while (" . $this->emitExpr($s->condition) . ");\n";
+            . "} while (" . $this->emitCondition($s->condition) . ");\n";
         // After first iteration types may change on subsequent iterations
         $this->varTypes = $this->mergeBranchTypes($saved, $this->varTypes);
         return $out;
@@ -209,7 +338,7 @@ final class PhpTranspiler
 
     private function emitSwitch(SwitchStmt $s): string
     {
-        // Use match(true) with === comparisons for ECMAScript strict equality semantics
+        // Compare via Ops::strictEquals() so JS Number semantics and object identity are preserved.
         $disc = '$__sw' . ($this->tmpId++);
         $out = "{$disc} = " . $this->emitExpr($s->discriminant) . ";\n";
         $out .= "switch (true) {\n";
@@ -218,7 +347,7 @@ final class PhpTranspiler
         foreach ($s->cases as $case) {
             $this->varTypes = $saved;
             if ($case->test !== null) {
-                $out .= "case ({$disc} === " . $this->emitExpr($case->test) . "):\n";
+                $out .= 'case (' . self::OPS . "::strictEquals({$disc}, " . $this->emitExpr($case->test) . ")):\n";
             } else {
                 $out .= "default:\n";
             }
@@ -244,12 +373,22 @@ final class PhpTranspiler
         $afterTry = $this->varTypes;
         if ($s->handler !== null) {
             $this->varTypes = $saved;
-            $this->addVar($s->handler->param);
+            $param = $s->handler->param;
+            // JS catch param is block-scoped: save outer value, restore after catch
+            $shadow = in_array($param, $this->getAllScopeVars(), true);
+            $saveVar = '$__save_' . $param . '_' . $this->tmpId++;
+            $this->addVar($param);
             $out .= " catch (\\Throwable \$__ex) {\n";
-            $out .= $this->indent(
-                '$' . $s->handler->param . " = \$__ex instanceof \\ScriptLite\\Vm\\JsThrowable ? \$__ex->value : \$__ex->getMessage();\n"
-                . $this->emitBlock($s->handler->body)
-            );
+            $body = '';
+            if ($shadow) {
+                $body .= "{$saveVar} = \${$param} ?? null;\n";
+            }
+            $body .= '$' . $param . " = \$__ex instanceof \\ScriptLite\\Vm\\JsThrowable ? \$__ex->value : \$__ex->getMessage();\n"
+                . $this->emitBlock($s->handler->body);
+            if ($shadow) {
+                $body .= "\${$param} = {$saveVar};\n";
+            }
+            $out .= $this->indent($body);
             $out .= "}\n";
             $this->varTypes = $this->mergeBranchTypes($afterTry, $this->varTypes);
         } else {
@@ -260,10 +399,14 @@ final class PhpTranspiler
 
     private function emitBlock(BlockStmt $b): string
     {
+        $savedRenames = $this->letRenames;
+        $this->blockDepth++;
         $out = '';
         foreach ($b->statements as $s) {
             $out .= $this->emitStmt($s);
         }
+        $this->blockDepth--;
+        $this->letRenames = $savedRenames;
         return $out;
     }
 
@@ -277,14 +420,14 @@ final class PhpTranspiler
             $e instanceof BooleanLiteral => $e->value ? 'true' : 'false',
             $e instanceof NullLiteral => 'null',
             $e instanceof UndefinedLiteral => 'null',
-            $e instanceof Identifier => '$' . $e->name,
+            $e instanceof Identifier => '$' . ($this->letRenames[$e->name] ?? $e->name),
             $e instanceof BinaryExpr => $this->emitBinary($e),
             $e instanceof UnaryExpr => $this->emitUnary($e),
             $e instanceof AssignExpr => $this->emitAssign($e),
             $e instanceof CallExpr => $this->emitCall($e),
-            $e instanceof FunctionExpr => $this->emitClosure($e->name, $e->params, $e->body, $e->isArrow, $e->restParam),
+            $e instanceof FunctionExpr => $this->emitFunctionExpr($e),
             $e instanceof LogicalExpr => $this->emitLogical($e),
-            $e instanceof ConditionalExpr => '(' . $this->emitExpr($e->condition) . ' ? ' . $this->emitExpr($e->consequent) . ' : ' . $this->emitExpr($e->alternate) . ')',
+            $e instanceof ConditionalExpr => '(' . $this->emitCondition($e->condition) . ' ? ' . $this->emitExpr($e->consequent) . ' : ' . $this->emitExpr($e->alternate) . ')',
             $e instanceof TypeofExpr => $this->emitTypeof($e),
             $e instanceof ArrayLiteral => $this->emitArray($e),
             $e instanceof ObjectLiteral => $this->emitObject($e),
@@ -325,23 +468,14 @@ final class PhpTranspiler
 
             // Fast path: either provably string → string concat
             if ($leftType === TypeHint::String || $rightType === TypeHint::String) {
-                return '((string)(' . $l . ') . (string)(' . $r . '))';
+                $ls = $leftType === TypeHint::String ? $l : self::OPS . '::toString(' . $l . ')';
+                $rs = $rightType === TypeHint::String ? $r : self::OPS . '::toString(' . $r . ')';
+                return '(' . $ls . ' . ' . $rs . ')';
             }
 
-            // Half-guard: one side numeric, only check the other
-            if ($leftType === TypeHint::Numeric) {
-                $tb = '$__t' . $this->tmpId++;
-                return "(is_string({$tb} = ({$r})) ? (string)({$l}) . {$tb} : ({$l}) + {$tb})";
-            }
-            if ($rightType === TypeHint::Numeric) {
-                $ta = '$__t' . $this->tmpId++;
-                return "(is_string({$ta} = ({$l})) ? {$ta} . (string)({$r}) : {$ta} + ({$r}))";
-            }
-
-            // Slow path: full guard (both sides unknown)
-            $ta = '$__t' . $this->tmpId++;
-            $tb = '$__t' . $this->tmpId++;
-            return "(is_string({$ta} = ({$l})) | is_string({$tb} = ({$r})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb})";
+            // Fall through to $__jsAdd for mixed/unknown types
+            // Handles ToPrimitive (arrays→string), string-concat, and numeric-add
+            return self::OPS . '::add(' . $l . ', ' . $r . ')';
         }
 
         if ($e->operator === '>>>') {
@@ -349,49 +483,184 @@ final class PhpTranspiler
         }
 
         if ($e->operator === 'in') {
-            $to = '$__t' . $this->tmpId++;
-            return "(({$to} = {$r}) instanceof \\ScriptLite\\Runtime\\JsObject ? array_key_exists((string)({$l}), {$to}->properties) : false)";
+            return self::OPS . '::hasProperty(' . $r . ', ' . $l . ')';
         }
 
         if ($e->operator === 'instanceof') {
-            return "({$l} instanceof \\ScriptLite\\Runtime\\JsObject && {$r} instanceof \\ScriptLite\\Runtime\\JsClosure && {$l}->constructor === {$r})";
+            $right = $e->right instanceof FunctionExpr
+                ? $this->emitFunctionExpr($e->right, forceBox: true)
+                : $r;
+            return self::OPS . '::instanceOf(' . $l . ', ' . $right . ')';
+        }
+
+        if ($e->operator === '==') {
+            $fast = $this->emitFastEquality($e->left, $e->right, strict: false);
+            if ($fast !== null) {
+                return $fast;
+            }
+            return self::OPS . '::looseEquals(' . $l . ', ' . $r . ')';
+        }
+        if ($e->operator === '!=') {
+            $fast = $this->emitFastEquality($e->left, $e->right, strict: false);
+            if ($fast !== null) {
+                return '(!' . $fast . ')';
+            }
+            return '(!' . self::OPS . '::looseEquals(' . $l . ', ' . $r . '))';
+        }
+        if ($e->operator === '===') {
+            $fast = $this->emitFastEquality($e->left, $e->right, strict: true);
+            if ($fast !== null) {
+                return $fast;
+            }
+            return self::OPS . '::strictEquals(' . $l . ', ' . $r . ')';
+        }
+        if ($e->operator === '!==') {
+            $fast = $this->emitFastEquality($e->left, $e->right, strict: true);
+            if ($fast !== null) {
+                return '(!' . $fast . ')';
+            }
+            return '(!' . self::OPS . '::strictEquals(' . $l . ', ' . $r . '))';
+        }
+
+        // JS / and %: use Ops methods to handle division by zero → NaN/Infinity
+        if ($e->operator === '/') {
+            if (
+                $this->inferType($e->left) === TypeHint::Numeric
+                && $this->inferType($e->right) === TypeHint::Numeric
+                && $e->right instanceof NumberLiteral
+                && $e->right->value != 0
+            ) {
+                return '(' . $l . ' / ' . $r . ')';
+            }
+            return self::OPS . '::div(' . $l . ', ' . $r . ')';
+        }
+        if ($e->operator === '%') {
+            // Known numerics with non-zero literal divisor: use native %
+            if (
+                $this->inferType($e->left) === TypeHint::Numeric
+                && $this->inferType($e->right) === TypeHint::Numeric
+                && $e->right instanceof NumberLiteral
+                && $e->right->value != 0
+            ) {
+                return '(' . $l . ' % ' . $r . ')';
+            }
+            return self::OPS . '::mod(' . $l . ', ' . $r . ')';
         }
 
         $op = match ($e->operator) {
-            '-', '*', '/', '%', '**' => $e->operator,
+            '-', '*', '**' => $e->operator,
             '&', '|', '^', '<<', '>>' => $e->operator,
-            '==' => '==',
-            '!=' => '!=',
-            '===' => '===',
-            '!==' => '!==',
             '<', '<=', '>', '>=' => $e->operator,
             default => throw new RuntimeException("Transpiler: unknown binary op {$e->operator}"),
         };
+
+        // JS arithmetic ops: coerce operands to number (strings, bools, null → number)
+        if (in_array($e->operator, ['-', '*', '%', '**'], true)) {
+            $leftType = $this->inferType($e->left);
+            $rightType = $this->inferType($e->right);
+            if ($leftType !== TypeHint::Numeric) { $l = self::OPS . '::toNumber(' . $l . ')'; }
+            if ($rightType !== TypeHint::Numeric) { $r = self::OPS . '::toNumber(' . $r . ')'; }
+        }
+
+        // JS relational ops: convert booleans to numbers (PHP quirk: true < 3 === false)
+        if (in_array($e->operator, ['<', '<=', '>', '>='], true)) {
+            $leftType = $this->inferType($e->left);
+            $rightType = $this->inferType($e->right);
+            if ($leftType === TypeHint::Bool) { $l = '(int)(' . $l . ')'; }
+            if ($rightType === TypeHint::Bool) { $r = '(int)(' . $r . ')'; }
+        }
+
         return '(' . $l . ' ' . $op . ' ' . $r . ')';
     }
 
     private function emitUnary(UnaryExpr $e): string
     {
         return match ($e->operator) {
-            '-' => '(-' . $this->emitExpr($e->operand) . ')',
-            '!' => '(!' . $this->emitExpr($e->operand) . ')',
+            '-' => '(-' . self::OPS . '::toNumber(' . $this->emitExpr($e->operand) . '))',
+            '!' => '(!' . self::OPS . '::toBoolean(' . $this->emitExpr($e->operand) . '))',
             '~' => '(~(int)' . $this->emitExpr($e->operand) . ')',
             default => throw new RuntimeException("Transpiler: unknown unary op {$e->operator}"),
         };
     }
 
-    private function emitUpdate(UpdateExpr $e): string
+    /**
+     * Emit an update expression (++/--) in void context — result is discarded.
+     * Avoids expensive IIFE closure by emitting a simple assignment or native ++/--.
+     */
+    private function emitUpdateVoid(UpdateExpr $e): string
     {
+        $sign = $e->operator === '++' ? '+' : '-';
+
         if ($e->argument instanceof Identifier) {
-            $var = '$' . $e->argument->name;
-            $op = $e->operator === '++' ? '++' : '--';
-            return $e->prefix ? "({$op}{$var})" : "({$var}{$op})";
+            $var = '$' . $this->resolveVar($e->argument->name);
+            $type = $this->inferFromName($e->argument->name);
+
+            if ($type === TypeHint::Numeric) {
+                return $e->operator === '++' ? "{$var}++" : "{$var}--";
+            }
+
+            return "{$var} = " . self::OPS . "::toNumber({$var}) {$sign} 1";
         }
+
         if ($e->argument instanceof MemberExpr) {
-            $obj = $this->emitExpr($e->argument->object);
             $key = $e->argument->computed
                 ? $this->emitExpr($e->argument->property)
                 : "'" . $e->argument->property->name . "'";
+
+            if ($e->argument->object instanceof Identifier || $e->argument->object instanceof ThisExpr) {
+                $obj = $e->argument->object instanceof ThisExpr
+                    ? '$__this'
+                    : '$' . $this->resolveVar($e->argument->object->name);
+
+                return "{$obj}[{$key}] = " . self::OPS . "::toNumber({$obj}[{$key}]) {$sign} 1";
+            }
+
+            $obj = $this->emitExpr($e->argument->object);
+            $op = $e->operator === '++' ? '++' : '--';
+            return $e->prefix ? "{$op}{$obj}[{$key}]" : "{$obj}[{$key}]{$op}";
+        }
+
+        // Fallback: use the full IIFE version
+        return $this->emitUpdate($e);
+    }
+
+    private function emitUpdate(UpdateExpr $e): string
+    {
+        if ($e->argument instanceof Identifier) {
+            $var = '$' . $this->resolveVar($e->argument->name);
+            if ($this->inferFromName($e->argument->name) === TypeHint::Numeric) {
+                $op = $e->operator;
+                return $e->prefix ? "({$op}{$var})" : "({$var}{$op})";
+            }
+            $old = '$__u' . $this->tmpId++;
+            $sign = $e->operator === '++' ? '+' : '-';
+
+            return '(function() use (&' . $var . ') { '
+                . $old . ' = ' . $var . '; '
+                . $var . ' = ' . self::OPS . '::toNumber(' . $var . ') ' . $sign . ' 1; '
+                . 'return ' . ($e->prefix ? $var : $old) . '; })()';
+        }
+        if ($e->argument instanceof MemberExpr) {
+            $key = $e->argument->computed
+                ? $this->emitExpr($e->argument->property)
+                : "'" . $e->argument->property->name . "'";
+
+            if ($e->argument->object instanceof Identifier || $e->argument->object instanceof ThisExpr) {
+                $obj = $e->argument->object instanceof ThisExpr
+                    ? '$__this'
+                    : '$' . $this->resolveVar($e->argument->object->name);
+                $old = '$__u' . $this->tmpId++;
+                $keyVar = '$__uk' . $this->tmpId++;
+                $sign = $e->operator === '++' ? '+' : '-';
+
+                return '(function() use (&' . $obj . ') { '
+                    . $keyVar . ' = ' . $key . '; '
+                    . $old . ' = ' . $obj . '[' . $keyVar . ']; '
+                    . $obj . '[' . $keyVar . '] = ' . self::OPS . '::toNumber(' . $old . ') ' . $sign . ' 1; '
+                    . 'return ' . ($e->prefix ? $obj . '[' . $keyVar . ']' : $old) . '; })()';
+            }
+
+            $obj = $this->emitExpr($e->argument->object);
             $op = $e->operator === '++' ? '++' : '--';
             return $e->prefix ? "({$op}{$obj}[{$key}])" : "({$obj}[{$key}]{$op})";
         }
@@ -410,40 +679,53 @@ final class PhpTranspiler
         return 'true';
     }
 
+    /** Resolve a variable name through the let-rename map. */
+    private function resolveVar(string $name): string
+    {
+        return $this->letRenames[$name] ?? $name;
+    }
+
     private function emitAssign(AssignExpr $e): string
     {
-        $this->addVar($e->name);
-        $val = $this->emitExpr($e->value);
+        $phpName = $this->resolveVar($e->name);
+        $this->addVar($phpName);
+        $val = $e->value instanceof FunctionExpr
+            ? $this->emitFunctionExpr($e->value, $e->name)
+            : $this->emitExpr($e->value);
         if ($e->operator === '=') {
-            $this->trackVar($e->name, $this->inferType($e->value));
-            return '($' . $e->name . ' = ' . $val . ')';
+            $this->trackVar($phpName, $this->inferType($e->value));
+            return '($' . $phpName . ' = ' . $val . ')';
         }
         if ($e->operator === '+=') {
-            $lhsType = $this->inferFromName($e->name);
+            $lhsType = $this->inferFromName($phpName);
             $rhsType = $this->inferType($e->value);
             // Fast path: both provably numeric
             if ($lhsType === TypeHint::Numeric && $rhsType === TypeHint::Numeric) {
-                return '($' . $e->name . ' += ' . $val . ')';
+                return '($' . $phpName . ' += ' . $val . ')';
             }
             // Fast path: lhs is string
             if ($lhsType === TypeHint::String) {
-                return '($' . $e->name . ' .= (string)(' . $val . '))';
+                return '($' . $phpName . ' .= (string)(' . $val . '))';
             }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
-            return '($' . $e->name . " = (is_string({$ta} = \${$e->name}) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
+            return '($' . $phpName . " = (is_string({$ta} = \${$phpName}) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
         }
         if ($e->operator === '??=') {
-            return '($' . $e->name . ' = $' . $e->name . ' ?? ' . $val . ')';
+            return '($' . $phpName . ' = $' . $phpName . ' ?? ' . $val . ')';
         }
         if ($e->operator === '>>>=') {
-            return '($' . $e->name . ' = ((int)$' . $e->name . ' & 0xFFFFFFFF) >> ((int)(' . $val . ') & 0x1F))';
+            return '($' . $phpName . ' = ((int)$' . $phpName . ' & 0xFFFFFFFF) >> ((int)(' . $val . ') & 0x1F))';
+        }
+        if ($e->operator === '/=') {
+            return '($' . $phpName . ' = ' . self::OPS . '::div($' . $phpName . ', ' . $val . '))';
+        }
+        if ($e->operator === '%=') {
+            return '($' . $phpName . ' = ' . self::OPS . '::mod($' . $phpName . ', ' . $val . '))';
         }
         $op = match ($e->operator) {
             '-=' => '-',
             '*=' => '*',
-            '/=' => '/',
-            '%=' => '%',
             '**=' => '**',
             '&=' => '&',
             '|=' => '|',
@@ -452,7 +734,7 @@ final class PhpTranspiler
             '>>=' => '>>',
             default => throw new RuntimeException("Transpiler: unknown assign op {$e->operator}"),
         };
-        return '($' . $e->name . ' = $' . $e->name . " {$op} {$val})";
+        return '($' . $phpName . ' = $' . $phpName . " {$op} {$val})";
     }
 
     private function emitLogical(LogicalExpr $e): string
@@ -464,13 +746,14 @@ final class PhpTranspiler
             // Nullish coalescing: return right if left is null
             return "(({$tmp} = {$left}) === null ? {$right} : {$tmp})";
         }
+        $ops = self::OPS;
         if ($e->operator === '||') {
             // JS || returns the first truthy operand (not a boolean)
-            return "(({$tmp} = {$left}) ? {$tmp} : {$right})";
+            return "({$ops}::toBoolean({$tmp} = {$left}) ? {$tmp} : {$right})";
         }
         if ($e->operator === '&&') {
             // JS && returns the first falsy operand, or the last if all truthy
-            return "(({$tmp} = {$left}) ? {$right} : {$tmp})";
+            return "({$ops}::toBoolean({$tmp} = {$left}) ? {$right} : {$tmp})";
         }
         return "({$left} {$e->operator} {$right})";
     }
@@ -480,12 +763,16 @@ final class PhpTranspiler
         // Fast path: known types at compile time
         if ($e->operand instanceof UndefinedLiteral) return "'undefined'";
         if ($e->operand instanceof NullLiteral) return "'object'";
+        // typeof undeclaredVar → 'undefined' (must not throw)
+        if ($e->operand instanceof Identifier && !in_array($e->operand->name, $this->getAllScopeVars(), true)) {
+            return "'undefined'";
+        }
         if ($e->operand instanceof ArrayLiteral || $e->operand instanceof ObjectLiteral) return "'object'";
         $hint = $this->inferType($e->operand);
         if ($hint === TypeHint::Numeric) return "'number'";
         if ($hint === TypeHint::String) return "'string'";
         if ($hint === TypeHint::Bool) return "'boolean'";
-        if ($hint === TypeHint::Array_) return "'object'";
+        if ($hint === TypeHint::Array_ || $hint === TypeHint::Object_) return "'object'";
 
         $v = '$__typeof' . ($this->tmpId++);
         $expr = $this->emitExpr($e->operand);
@@ -495,7 +782,7 @@ final class PhpTranspiler
             . ": (is_bool({$v}) ? 'boolean' "
             . ": (is_int({$v}) || is_float({$v}) ? 'number' "
             . ": (is_string({$v}) ? 'string' "
-            . ": ({$v} instanceof \\Closure ? 'function' : 'object')))))";
+            . ": (({$v} instanceof \\Closure || {$v} instanceof " . self::JS_FUNCTION . ") ? 'function' : 'object')))))";
     }
 
     private function emitArray(ArrayLiteral $e): string
@@ -519,7 +806,13 @@ final class PhpTranspiler
                     $parts[] = '[' . implode(', ', $current) . ']';
                     $current = [];
                 }
-                $parts[] = $this->emitExpr($el->argument);
+                $arg = $this->emitExpr($el->argument);
+                $hint = $this->inferType($el->argument);
+                if ($hint === TypeHint::String) {
+                    $parts[] = "mb_str_split({$arg}, 1, 'UTF-8')";
+                } else {
+                    $parts[] = "(is_string(\$__sp = ({$arg})) ? mb_str_split(\$__sp, 1, 'UTF-8') : \$__sp)";
+                }
             } else {
                 $current[] = $this->emitExpr($el);
             }
@@ -533,23 +826,50 @@ final class PhpTranspiler
     private function emitObject(ObjectLiteral $e): string
     {
         if (empty($e->properties)) {
-            return '[]';
+            return 'new ' . self::JS_OBJECT . '()';
         }
+
+        $allStatic = true;
+        foreach ($e->properties as $prop) {
+            if ($prop->computed && $prop->computedKey !== null) {
+                $allStatic = false;
+                break;
+            }
+        }
+
+        if ($allStatic) {
+            $pairs = [];
+            foreach ($e->properties as $prop) {
+                $pairs[] = $this->escapeStr($prop->key) . ' => ' . $this->emitExpr($prop->value);
+            }
+            return 'new ' . self::JS_OBJECT . '([' . implode(', ', $pairs) . '])';
+        }
+
         $pairs = [];
         foreach ($e->properties as $prop) {
-            $pairs[] = $this->escapeStr($prop->key) . ' => ' . $this->emitExpr($prop->value);
+            if ($prop->computed && $prop->computedKey !== null) {
+                $pairs[] = '[' . $this->emitExpr($prop->computedKey) . ', ' . $this->emitExpr($prop->value) . ']';
+            } else {
+                $pairs[] = '[' . $this->escapeStr($prop->key) . ', ' . $this->emitExpr($prop->value) . ']';
+            }
         }
-        return '[' . implode(', ', $pairs) . ']';
+        return self::OPS . '::objectLiteral([' . implode(', ', $pairs) . '])';
     }
 
     private function emitMember(MemberExpr $e): string
     {
-        $obj = $this->emitExpr($e->object);
+        $obj = $e->object instanceof FunctionExpr
+            ? $this->emitFunctionExpr($e->object, forceBox: true)
+            : $this->emitExpr($e->object);
+        $objType = $this->inferType($e->object);
 
         // Optional chaining: obj?.prop → temp var + null guard
         if ($e->optional) {
             $tmp = '$__oc' . ($this->tmpId++);
             if (!$e->computed && $e->property instanceof Identifier) {
+                if ($objType === TypeHint::Object_) {
+                    return "(({$tmp} = {$obj}) === null ? null : ({$tmp}->properties['{$e->property->name}'] ?? null))";
+                }
                 return "(({$tmp} = {$obj}) === null ? null : {$tmp}['{$e->property->name}'])";
             }
             $key = $this->emitExpr($e->property);
@@ -567,16 +887,32 @@ final class PhpTranspiler
                 };
             }
 
-            // .length → count() for arrays, strlen() for strings
+            // Number constants
+            if ($e->object instanceof Identifier && $e->object->name === 'Number') {
+                return match ($name) {
+                    'MAX_SAFE_INTEGER' => '9007199254740991',
+                    'MIN_SAFE_INTEGER' => '-9007199254740991',
+                    'POSITIVE_INFINITY' => 'INF',
+                    'NEGATIVE_INFINITY' => '-INF',
+                    'NaN' => 'NAN',
+                    'EPSILON' => '2.2204460492503131e-16',
+                    default => "\${$e->object->name}['{$name}']",
+                };
+            }
+
+            // .length → count() for arrays, mb_strlen() for strings
             if ($name === 'length') {
-                $objType = $this->inferType($e->object);
                 if ($objType === TypeHint::Array_) {
                     return "count({$obj})";
                 }
                 if ($objType === TypeHint::String) {
-                    return "strlen({$obj})";
+                    return "mb_strlen({$obj}, 'UTF-8')";
                 }
-                return "(is_string({$obj}) ? strlen({$obj}) : count({$obj}))";
+                return self::OPS . '::getLength(' . $obj . ')';
+            }
+
+            if ($objType === TypeHint::Object_) {
+                return "({$obj}->properties['{$name}'] ?? null)";
             }
 
             return "{$obj}['{$name}']";
@@ -584,13 +920,20 @@ final class PhpTranspiler
 
         // Computed: obj[expr]
         $key = $this->emitExpr($e->property);
+        if ($objType === TypeHint::Object_) {
+            return "({$obj}->properties[{$key}] ?? null)";
+        }
         return "{$obj}[{$key}]";
     }
 
     private function emitMemberAssign(MemberAssignExpr $e): string
     {
         $val = $this->emitExpr($e->value);
-        $objCode = $e->object instanceof ThisExpr ? '$__this' : $this->emitExpr($e->object);
+        $objCode = match (true) {
+            $e->object instanceof ThisExpr => '$__this',
+            $e->object instanceof FunctionExpr => $this->emitFunctionExpr($e->object, forceBox: true),
+            default => $this->emitExpr($e->object),
+        };
 
         if (!$e->computed && $e->property instanceof Identifier) {
             $key = "'" . $e->property->name . "'";
@@ -620,9 +963,14 @@ final class PhpTranspiler
         if ($e->operator === '>>>=') {
             return "({$objCode}[{$key}] = ((int){$objCode}[{$key}] & 0xFFFFFFFF) >> ((int)({$val}) & 0x1F))";
         }
+        if ($e->operator === '/=') {
+            return "({$objCode}[{$key}] = " . self::OPS . "::div({$objCode}[{$key}], {$val}))";
+        }
+        if ($e->operator === '%=') {
+            return "({$objCode}[{$key}] = " . self::OPS . "::mod({$objCode}[{$key}], {$val}))";
+        }
         $op = match ($e->operator) {
-            '-=' => '-', '*=' => '*', '/=' => '/',
-            '%=' => '%', '**=' => '**',
+            '-=' => '-', '*=' => '*', '**=' => '**',
             '&=' => '&', '|=' => '|', '^=' => '^',
             '<<=' => '<<', '>>=' => '>>',
             default => throw new RuntimeException("Unknown member assign op {$e->operator}"),
@@ -632,21 +980,25 @@ final class PhpTranspiler
 
     private function emitNew(NewExpr $e): string
     {
-        // Constructor functions return arrays (objects). Just call them directly.
-        $callee = $this->emitExpr($e->callee);
-
-        $hasSpread = false;
-        foreach ($e->arguments as $a) {
-            if ($a instanceof SpreadElement) { $hasSpread = true; break; }
-        }
-
-        if (!$hasSpread) {
+        // new Date(...)
+        if ($e->callee instanceof Identifier && $e->callee->name === 'Date') {
             $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
-            return $callee . '(' . implode(', ', $args) . ')';
+            return 'new \\ScriptLite\\Transpiler\\Runtime\\TrDate(' . implode(', ', $args) . ')';
         }
 
-        $merged = $this->emitSpreadArgs($e->arguments);
-        return $callee . '(...' . $merged . ')';
+        // new RegExp(pattern, flags)
+        if ($e->callee instanceof Identifier && $e->callee->name === 'RegExp') {
+            return self::OPS . '::createRegex(' . implode(', ', array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments)) . ')';
+        }
+
+        $callee = $e->callee instanceof FunctionExpr
+            ? $this->emitFunctionExpr($e->callee, forceBox: true)
+            : $this->emitExpr($e->callee);
+        $args = $this->hasSpreadArg($e->arguments)
+            ? $this->emitSpreadArgs($e->arguments)
+            : '[' . implode(', ', array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments)) . ']';
+
+        return self::OPS . '::construct(' . $callee . ', ' . $args . ')';
     }
 
     private function emitTemplateLiteral(TemplateLiteral $e): string
@@ -682,7 +1034,10 @@ final class PhpTranspiler
     {
         $pcre = $this->jsToPcre($e->pattern, $e->flags);
         $isGlobal = str_contains($e->flags, 'g') ? 'true' : 'false';
-        return "['__re' => true, 'pcre' => {$pcre}, 'g' => {$isGlobal}]";
+        $isIgnoreCase = str_contains($e->flags, 'i') ? 'true' : 'false';
+        $source = $this->escapeStr($e->pattern);
+        $flags = $this->escapeStr($e->flags);
+        return "['__re' => true, 'pcre' => {$pcre}, 'source' => {$source}, 'flags' => {$flags}, 'g' => {$isGlobal}, 'global' => {$isGlobal}, 'ignoreCase' => {$isIgnoreCase}]";
     }
 
     // ───────────────── Function Calls ─────────────────
@@ -692,6 +1047,21 @@ final class PhpTranspiler
         // Method call: obj.method(args)
         if ($e->callee instanceof MemberExpr && !$e->callee->computed && $e->callee->property instanceof Identifier) {
             return $this->emitMethodCall($e->callee, $e->arguments);
+        }
+
+        // Built-in global functions (only when no spread args)
+        if ($e->callee instanceof Identifier && !$this->hasSpreadArg($e->arguments)) {
+            $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
+            $mapped = match ($e->callee->name) {
+                'isNaN' => 'is_nan(' . self::OPS . '::toNumber(' . $args[0] . '))',
+                'isFinite' => 'is_finite(' . self::OPS . '::toNumber(' . $args[0] . '))',
+                'parseInt' => self::OPS . '::parseInt(' . implode(', ', $args) . ')',
+                'parseFloat' => '(is_numeric($__pf = (string)(' . $args[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
+                default => null,
+            };
+            if ($mapped !== null) {
+                return $mapped;
+            }
         }
 
         // Global function call
@@ -717,6 +1087,15 @@ final class PhpTranspiler
     }
 
     /** @param array<Expr|SpreadElement> $args */
+    /** @param array<Expr|SpreadElement> $args */
+    private function hasSpreadArg(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a instanceof SpreadElement) { return true; }
+        }
+        return false;
+    }
+
     private function emitSpreadArgs(array $args): string
     {
         $parts = [];
@@ -745,8 +1124,14 @@ final class PhpTranspiler
     private function emitMethodCall(MemberExpr $callee, array $args): string
     {
         $method = $callee->property->name;
-        $obj = $this->emitExpr($callee->object);
+        $obj = $callee->object instanceof FunctionExpr
+            ? $this->emitFunctionExpr($callee->object, forceBox: true)
+            : $this->emitExpr($callee->object);
         $emitArgs = fn() => array_map(fn(Expr $a) => $this->emitExpr($a), $args);
+        $objectType = $this->inferType($callee->object);
+        $dynamicMethod = $objectType === TypeHint::Object_
+            ? "({$obj}->properties['{$method}'] ?? null)"
+            : "{$obj}['{$method}']";
 
         // ── Math.* ──
         if ($callee->object instanceof Identifier && $callee->object->name === 'Math') {
@@ -759,7 +1144,7 @@ final class PhpTranspiler
                 'min' => 'min(' . $a[0] . ', ' . $a[1] . ')',
                 'round' => '(int)round(' . $a[0] . ')',
                 'random' => '(mt_rand() / mt_getrandmax())',
-                default => "{$obj}['{$method}'](" . implode(', ', $a) . ")",
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
             };
         }
 
@@ -767,6 +1152,93 @@ final class PhpTranspiler
         if ($callee->object instanceof Identifier && $callee->object->name === 'console' && $method === 'log') {
             $a = $emitArgs();
             return '(($__out .= implode(" ", array_map("strval", [' . implode(', ', $a) . '])) . "\\n") ? null : null)';
+        }
+
+        // ── Date.* ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'Date') {
+            $a = $emitArgs();
+            return match ($method) {
+                'now' => '(int)(microtime(true) * 1000)',
+                'parse' => '(int)(strtotime(' . $a[0] . ') * 1000)',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── Array.* ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'Array') {
+            $a = $emitArgs();
+            return match ($method) {
+                'isArray' => 'is_array(' . $a[0] . ')',
+                'from' => 'array_values((array)(' . $a[0] . '))',
+                'of' => '[' . implode(', ', $a) . ']',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── Object.* ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'Object') {
+            $a = $emitArgs();
+            return match ($method) {
+                'keys' => self::OPS . '::keys(' . $a[0] . ')',
+                'values' => self::OPS . '::values(' . $a[0] . ')',
+                'entries' => self::OPS . '::entries(' . $a[0] . ')',
+                'assign' => self::OPS . '::objectAssign(' . implode(', ', $a) . ')',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── Number.* ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'Number') {
+            $a = $emitArgs();
+            $t = '$__t' . $this->tmpId++;
+            return match ($method) {
+                'isInteger' => "(is_int({$t} = {$a[0]}) || (is_float({$t}) && {$t} == (int){$t}))",
+                'isFinite' => "(is_int({$t} = {$a[0]}) || (is_float({$t}) && is_finite({$t})))",
+                'isNaN' => "(is_float({$t} = {$a[0]}) && is_nan({$t}))",
+                'parseInt' => self::OPS . '::parseInt(' . implode(', ', $a) . ')',
+                'parseFloat' => '(is_numeric($__pf = (string)(' . $a[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── JSON.* ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'JSON') {
+            $a = $emitArgs();
+            return match ($method) {
+                'stringify' => self::OPS . '::jsonStringify(' . $a[0] . ')',
+                'parse' => self::OPS . '::jsonParse(' . $a[0] . ')',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── String.* static methods ──
+        if ($callee->object instanceof Identifier && $callee->object->name === 'String') {
+            $a = $emitArgs();
+            return match ($method) {
+                'fromCharCode' => 'implode("", array_map(fn($c) => mb_chr((int)$c, "UTF-8"), [' . implode(', ', $a) . ']))',
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── Regex .test() / .exec() ──
+        $execHelper = self::OPS . '::regexExec';
+        if ($callee->object instanceof RegexLiteral) {
+            $pcre = $this->jsToPcre($callee->object->pattern, $callee->object->flags);
+            $a = $emitArgs();
+            return match ($method) {
+                'test' => '(bool)preg_match(' . $pcre . ', ' . $a[0] . ')',
+                'exec' => "{$execHelper}({$pcre}, {$a[0]})",
+                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+        // Regex stored in variable: detect ['__re' => true] pattern
+        if ($method === 'test' || $method === 'exec') {
+            $a = $emitArgs();
+            $t = '$__t' . $this->tmpId++;
+            if ($method === 'test') {
+                return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? (bool)preg_match({$t}['pcre'], {$a[0]}) : {$t}['{$method}']({$a[0]}))";
+            }
+            return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? {$execHelper}({$t}['pcre'], {$a[0]}) : {$t}['{$method}']({$a[0]}))";
         }
 
         $a = $emitArgs();
@@ -778,8 +1250,8 @@ final class PhpTranspiler
             'pop' => 'array_pop(' . $obj . ')',
             'shift' => 'array_shift(' . $obj . ')',
             'unshift' => 'array_unshift(' . $obj . ', ' . $a[0] . ')',
-            'filter' => 'array_values(array_filter(' . $obj . ', ' . $a[0] . '))',
-            'map' => 'array_map(' . $a[0] . ', ' . $obj . ')',
+            'filter' => 'array_values(array_filter(' . $obj . ', ' . $a[0] . ', ARRAY_FILTER_USE_BOTH))',
+            'map' => 'array_map(' . $a[0] . ', ' . $obj . ', array_keys(' . $obj . '))',
             'reduce' => 'array_reduce(' . $obj . ', ' . $a[0] . (isset($a[1]) ? ', ' . $a[1] : '') . ')',
             'forEach' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { ({$a[0]})(\$__v, \$__i); } })()",
             'every' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (!({$a[0]})(\$__v, \$__i)) return false; } return true; })()",
@@ -787,38 +1259,48 @@ final class PhpTranspiler
             'find' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__v; } return null; })()",
             'findIndex' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__i; } return -1; })()",
             'join' => 'implode(' . ($a[0] ?? "','") . ', ' . $obj . ')',
-            'concat' => 'array_merge(' . $obj . ', ' . $a[0] . ')',
-            'indexOf' => '(($__p = array_search(' . $a[0] . ', ' . $obj . ', true)) === false ? -1 : $__p)',
-            'includes' => 'in_array(' . $a[0] . ', ' . $obj . ', true)',
+            'concat' => $this->emitConcat($obj, $a, $objectType),
+            'indexOf' => $this->emitIndexOf($obj, $a),
+            'includes' => $this->emitIncludes($obj, $a),
             'slice' => $this->emitSlice($obj, $a),
-            'sort' => "(function(){$use} { usort({$obj}, {$a[0]}); return {$obj}; })()",
+            'sort' => isset($a[0])
+                ? "(function(){$use} { usort({$obj}, {$a[0]}); return {$obj}; })()"
+                : "(function(){$use} { usort({$obj}, function(\$a, \$b) { return strcmp((string)\$a, (string)\$b); }); return {$obj}; })()",
             'reverse' => 'array_reverse(' . $obj . ')',
             'flat' => $this->emitFlat($obj, $a),
-            'splice' => 'array_splice(' . $obj . ', ' . implode(', ', $a) . ')',
+            'splice' => count($a) > 2
+                ? 'array_splice(' . $obj . ', ' . $a[0] . ', ' . $a[1] . ', [' . implode(', ', array_slice($a, 2)) . '])'
+                : 'array_splice(' . $obj . ', ' . implode(', ', $a) . ')',
             'fill' => "(function(){$use} { for (\$__i = " . ($a[1] ?? '0') . "; \$__i < " . ($a[2] ?? 'count(' . $obj . ')') . "; \$__i++) { {$obj}[\$__i] = {$a[0]}; } return {$obj}; })()",
 
             // ── String methods ──
-            'split' => $this->emitStrSplit($obj, $a),
-            'toUpperCase' => 'strtoupper(' . $obj . ')',
-            'toLowerCase' => 'strtolower(' . $obj . ')',
+            'split' => $this->emitStrSplit($obj, $a, $args),
+            'toUpperCase' => 'mb_strtoupper(' . $obj . ', \'UTF-8\')',
+            'toLowerCase' => 'mb_strtolower(' . $obj . ', \'UTF-8\')',
             'trim' => 'trim(' . $obj . ')',
             'trimStart' => 'ltrim(' . $obj . ')',
             'trimEnd' => 'rtrim(' . $obj . ')',
-            'charAt' => 'substr(' . $obj . ', (int)' . $a[0] . ', 1)',
-            'substring' => 'substr(' . $obj . ', ' . $a[0] . (isset($a[1]) ? ', ' . $a[1] . ' - ' . $a[0] : '') . ')',
-            'startsWith' => 'str_starts_with(' . $obj . ', ' . $a[0] . ')',
-            'endsWith' => 'str_ends_with(' . $obj . ', ' . $a[0] . ')',
+            'charAt' => $this->emitCharAt($obj, $a),
+            'charCodeAt' => $this->emitCharCodeAt($obj, $a),
+            'substring' => $this->emitSubstring($obj, $a),
+            'startsWith' => $this->emitStartsWith($obj, $a),
+            'endsWith' => $this->emitEndsWith($obj, $a),
             'repeat' => 'str_repeat(' . $obj . ', (int)' . $a[0] . ')',
             'replace' => $this->emitStrReplace($obj, $a, $args),
             'match' => $this->emitStrMatch($obj, $a, $args),
             'matchAll' => $this->emitStrMatchAll($obj, $a, $args),
             'search' => $this->emitStrSearch($obj, $a, $args),
+            'padStart' => $this->emitPadStart($obj, $a),
+            'padEnd' => $this->emitPadEnd($obj, $a),
+            'lastIndexOf' => $this->emitLastIndexOf($obj, $a),
 
             // ── Object methods ──
-            'hasOwnProperty' => 'array_key_exists(' . $a[0] . ', ' . $obj . ')',
+            'hasOwnProperty' => $objectType === TypeHint::Object_
+                ? "array_key_exists({$a[0]}, {$obj}->properties)"
+                : self::OPS . '::hasOwn(' . $obj . ', ' . $a[0] . ')',
 
             // ── Unknown method → property access returning function ──
-            default => "{$obj}['{$method}'](" . implode(', ', $a) . ")",
+            default => $dynamicMethod . '(' . implode(', ', $a) . ')',
         };
     }
 
@@ -827,21 +1309,44 @@ final class PhpTranspiler
     private function emitSlice(string $obj, array $a): string
     {
         $start = $a[0];
-        $len = isset($a[1]) ? "{$a[1]} - {$a[0]}" : null;
         $t = '$__t' . $this->tmpId++;
-        $arrSlice = "array_slice({$t}, {$start}" . ($len !== null ? ", {$len}" : "") . ")";
-        $strSlice = "substr({$t}, {$start}" . ($len !== null ? ", {$len}" : "") . ")";
+        // For strings: handle negative indices per JS spec using Ops::slice
+        $strSlice = self::OPS . "::strSlice({$t}, (int)({$start})" . (isset($a[1]) ? ", (int)({$a[1]})" : "") . ")";
+        // For arrays: use array_slice with negative support
+        $arrSlice = isset($a[1])
+            ? "array_slice({$t}, {$start}, {$a[1]} - {$start})"
+            : "array_slice({$t}, {$start})";
         return "(is_string({$t} = {$obj}) ? {$strSlice} : {$arrSlice})";
     }
 
-    private function emitStrSplit(string $obj, array $a): string
+    private function emitStrSplit(string $obj, array $a, array $argExprs = []): string
     {
-        $sep = $a[0] ?? "''";
+        // No arguments: JS split() returns [originalString]
+        if (!isset($a[0])) {
+            return "[{$obj}]";
+        }
+        $sep = $a[0];
+        $limit = $a[1] ?? null;
+
+        // Fast path: separator is a string literal — no IIFE needed
+        if (isset($argExprs[0]) && $argExprs[0] instanceof StringLiteral) {
+            $sepValue = $argExprs[0]->value;
+            if ($sepValue === '') {
+                return $limit !== null
+                    ? "array_slice(mb_str_split({$obj}), 0, (int)({$limit}))"
+                    : "mb_str_split({$obj})";
+            }
+            return $limit !== null
+                ? "array_slice(explode({$sep}, {$obj}), 0, (int)({$limit}))"
+                : "explode({$sep}, {$obj})";
+        }
+
+        // Slow path: separator might be a regex — need IIFE for branching
         $use = $this->makeUseClause();
         return "(function(){$use} { \$__s = {$sep}; \$__o = {$obj}; "
-            . "if (is_array(\$__s) && (\$__s['__re'] ?? false)) return preg_split(\$__s['pcre'], \$__o); "
-            . "if (\$__s === '') return str_split(\$__o); "
-            . "return explode(\$__s, \$__o); })()";
+            . "if (is_array(\$__s) && (\$__s['__re'] ?? false)) return preg_split(\$__s['pcre'], \$__o" . ($limit !== null ? ", (int)({$limit})" : "") . "); "
+            . "if (\$__s === '') return " . ($limit !== null ? "array_slice(mb_str_split(\$__o), 0, (int)({$limit}))" : "mb_str_split(\$__o)") . "; "
+            . "return " . ($limit !== null ? "array_slice(explode(\$__s, \$__o), 0, (int)({$limit}))" : "explode(\$__s, \$__o)") . "; })()";
     }
 
     private function emitStrReplace(string $obj, array $a, array $argExprs): string
@@ -892,11 +1397,144 @@ final class PhpTranspiler
         return "(function(\$arr, \$d) { \$f = function(\$a, \$d) use (&\$f) { \$r = []; foreach (\$a as \$v) { if (is_array(\$v) && \$d > 0) \$r = array_merge(\$r, \$f(\$v, \$d-1)); else \$r[] = \$v; } return \$r; }; return \$f(\$arr, \$d); })({$obj}, {$depth})";
     }
 
+    private function emitCharAt(string $obj, array $a): string
+    {
+        $t = '$__t' . $this->tmpId++;
+        $t2 = '$__t' . $this->tmpId++;
+        // JS charAt: negative or OOB index returns '', not wrap-around
+        return "(({$t} = (int)({$a[0]})) < 0 || {$t} >= mb_strlen({$t2} = {$obj}, 'UTF-8') ? '' : mb_substr({$t2}, {$t}, 1, 'UTF-8'))";
+    }
+
+    private function emitCharCodeAt(string $obj, array $a): string
+    {
+        $t = '$__t' . $this->tmpId++;
+        return "(({$t} = mb_substr({$obj}, (int)({$a[0]}), 1, 'UTF-8')) === '' || {$t} === false ? NAN : mb_ord({$t}, 'UTF-8'))";
+    }
+
+    private function emitSubstring(string $obj, array $a): string
+    {
+        $use = $this->makeUseClause();
+        if (!isset($a[1])) {
+            return "mb_substr({$obj}, (int)({$a[0]}), null, 'UTF-8')";
+        }
+        // JS substring swaps if start > end
+        return "(function(){$use} { \$__s = (int)({$a[0]}); \$__e = (int)({$a[1]}); if (\$__s > \$__e) [\$__s, \$__e] = [\$__e, \$__s]; return mb_substr({$obj}, \$__s, \$__e - \$__s, 'UTF-8'); })()";
+    }
+
+    private function emitStartsWith(string $obj, array $a): string
+    {
+        if (!isset($a[1])) {
+            return 'str_starts_with(' . $obj . ', ' . $a[0] . ')';
+        }
+        // startsWith with position: check from offset
+        return "(mb_substr({$obj}, (int)({$a[1]}), mb_strlen({$a[0]}, 'UTF-8'), 'UTF-8') === {$a[0]})";
+    }
+
+    private function emitEndsWith(string $obj, array $a): string
+    {
+        if (!isset($a[1])) {
+            return 'str_ends_with(' . $obj . ', ' . $a[0] . ')';
+        }
+        // endsWith with endPosition: check within first N chars
+        return "str_ends_with(mb_substr({$obj}, 0, (int)({$a[1]}), 'UTF-8'), {$a[0]})";
+    }
+
+    private function emitIndexOf(string $obj, array $a): string
+    {
+        $t = '$__t' . $this->tmpId++;
+        if (!isset($a[1])) {
+            // No fromIndex — dispatch on string vs array
+            return "(is_string({$t} = {$obj}) ? (({$t} = mb_strpos({$t}, {$a[0]}, 0, 'UTF-8')) === false ? -1 : {$t}) : (({$t} = array_search({$a[0]}, {$t}, true)) === false ? -1 : {$t}))";
+        }
+        // With fromIndex
+        $t2 = '$__t' . $this->tmpId++;
+        return "(is_string({$t} = {$obj}) ? (({$t2} = mb_strpos({$t}, {$a[0]}, max(0, (int)({$a[1]})), 'UTF-8')) === false ? -1 : {$t2}) : (({$t2} = array_search({$a[0]}, array_slice({$t}, (int)({$a[1]}), null, true), true)) === false ? -1 : {$t2}))";
+    }
+
+    private function emitIncludes(string $obj, array $a): string
+    {
+        $t = '$__t' . $this->tmpId++;
+        if (!isset($a[1])) {
+            return "(is_string({$t} = {$obj}) ? str_contains({$t}, {$a[0]}) : in_array({$a[0]}, {$t}, true))";
+        }
+        // With fromIndex
+        return "(is_string({$t} = {$obj}) ? str_contains(mb_substr({$t}, (int)({$a[1]}), null, 'UTF-8'), {$a[0]}) : in_array({$a[0]}, array_slice({$t}, (int)({$a[1]})), true))";
+    }
+
+    private function emitConcat(string $obj, array $a, ?TypeHint $objType = null): string
+    {
+        // Helper: wrap arg for array_merge — cache in temp var to avoid re-evaluation
+        $wrapArg = function (string $x): string {
+            // Simple variables and literals don't need caching
+            if (preg_match('/^\$\w+$/', $x) || preg_match('/^\[/', $x) || preg_match('/^\'/', $x)) {
+                return "is_array({$x}) ? {$x} : [{$x}]";
+            }
+            $t = '$__ca' . $this->tmpId++;
+            return "is_array({$t} = {$x}) ? {$t} : [{$t}]";
+        };
+
+        // Known array type: skip the is_string() check entirely
+        if ($objType === TypeHint::Array_) {
+            return 'array_merge(' . $obj . ', ' . implode(', ', array_map($wrapArg, $a)) . ')';
+        }
+
+        // Known string type: skip the check
+        if ($objType === TypeHint::String) {
+            return $obj . ' . ' . implode(' . ', $a);
+        }
+
+        // Unknown: cache object in temp var to prevent re-evaluation
+        $t = '$__t' . $this->tmpId++;
+        $strConcat = $t . ' . ' . implode(' . ', $a);
+        $arrConcat = 'array_merge(' . $t . ', ' . implode(', ', array_map($wrapArg, $a)) . ')';
+        return "(is_string({$t} = {$obj}) ? {$strConcat} : {$arrConcat})";
+    }
+
+    private function emitPadStart(string $obj, array $a): string
+    {
+        $fillStr = $a[1] ?? "' '";
+        return "str_pad({$obj}, (int)({$a[0]}), {$fillStr}, STR_PAD_LEFT)";
+    }
+
+    private function emitPadEnd(string $obj, array $a): string
+    {
+        $fillStr = $a[1] ?? "' '";
+        return "str_pad({$obj}, (int)({$a[0]}), {$fillStr}, STR_PAD_RIGHT)";
+    }
+
+    private function emitLastIndexOf(string $obj, array $a): string
+    {
+        $t = '$__t' . $this->tmpId++;
+        return "(({$t} = mb_strrpos({$obj}, {$a[0]}, 0, 'UTF-8')) === false ? -1 : {$t})";
+    }
+
     // ───────────────── Closures / Functions ─────────────────
 
-    private function emitClosure(?string $name, array $params, array $body, bool $isArrow = false, ?string $restParam = null): string
+    private function emitFunctionExpr(FunctionExpr $expr, ?string $boundName = null, bool $forceBox = false): string
+    {
+        return $this->emitClosure(
+            $expr->name,
+            $expr->params,
+            $expr->body,
+            $expr->isArrow,
+            $expr->restParam,
+            $forceBox || $this->needsBoxedFunction($boundName ?? $expr->name, $expr->isArrow, $expr->body),
+        );
+    }
+
+    private function emitClosure(
+        ?string $name,
+        array $params,
+        array $body,
+        bool $isArrow = false,
+        ?string $restParam = null,
+        bool $boxFunction = true
+    ): string
     {
         $isConstructor = !$isArrow && $this->bodyContainsThis($body);
+        $savedRenames = $this->letRenames;
+        $savedBlockDepth = $this->blockDepth;
+        $this->blockDepth = 0;
 
         // Push new scope — include rest param in scope
         $allParams = $params;
@@ -926,7 +1564,7 @@ final class PhpTranspiler
 
         $useClause = '';
         if (!empty($captured)) {
-            $refs = array_map(fn($v) => '&$' . $v, $captured);
+            $refs = array_map(fn($v) => '&$' . $this->resolveVar($v), $captured);
             $useClause = ' use (' . implode(', ', $refs) . ')';
         }
 
@@ -943,7 +1581,7 @@ final class PhpTranspiler
 
         $innerCode = '';
         if ($isConstructor) {
-            $innerCode .= "\$__this = [];\n";
+            $innerCode .= '$__this = new ' . self::JS_OBJECT . "(['__scriptlite_ctor' => true]);\n";
         }
 
         // Hoist function declarations
@@ -965,10 +1603,72 @@ final class PhpTranspiler
         $this->varTypes = $savedVarTypes;
         $this->inConstructor = $prevConstructor;
         $this->popScope();
+        $this->letRenames = $savedRenames;
+        $this->blockDepth = $savedBlockDepth;
 
-        return "function(" . implode(', ', $paramList) . ")" . $useClause . " {\n"
+        $closure = "static function(" . implode(', ', $paramList) . ")" . $useClause . " {\n"
             . $this->indent($innerCode)
             . "}";
+
+        if ($boxFunction) {
+            return 'new ' . self::JS_FUNCTION . '(' . $closure . ')';
+        }
+
+        return $closure;
+    }
+
+    private function needsBoxedFunction(?string $bindingName, bool $isArrow, array $body): bool
+    {
+        if (!$isArrow && $this->bodyContainsThis($body)) {
+            return true;
+        }
+
+        return $bindingName !== null && isset($this->boxedFunctionBindings[$bindingName]);
+    }
+
+    private function emitFastEquality(Expr $leftExpr, Expr $rightExpr, bool $strict): ?string
+    {
+        $left = $this->emitExpr($leftExpr);
+        $right = $this->emitExpr($rightExpr);
+        $leftType = $this->inferType($leftExpr);
+        $rightType = $this->inferType($rightExpr);
+
+        $leftNullish = $leftExpr instanceof NullLiteral || $leftExpr instanceof UndefinedLiteral;
+        $rightNullish = $rightExpr instanceof NullLiteral || $rightExpr instanceof UndefinedLiteral;
+
+        if ($leftNullish && $rightNullish) {
+            return 'true';
+        }
+
+        if ($leftNullish) {
+            return '(' . $right . ' === null)';
+        }
+
+        if ($rightNullish) {
+            return '(' . $left . ' === null)';
+        }
+
+        if ($leftType === TypeHint::Numeric && $rightType === TypeHint::Numeric) {
+            return '(!is_nan((float)(' . $left . ')) && !is_nan((float)(' . $right . ')) && ((float)(' . $left . ') == (float)(' . $right . ')))';
+        }
+
+        if ($leftType === TypeHint::String && $rightType === TypeHint::String) {
+            return '(' . $left . ' === ' . $right . ')';
+        }
+
+        if ($leftType === TypeHint::Bool && $rightType === TypeHint::Bool) {
+            return '(' . $left . ' === ' . $right . ')';
+        }
+
+        if (!$strict && $leftType === $rightType && $leftType !== TypeHint::Unknown) {
+            return match ($leftType) {
+                TypeHint::Numeric => '(!is_nan((float)(' . $left . ')) && !is_nan((float)(' . $right . ')) && ((float)(' . $left . ') == (float)(' . $right . ')))',
+                TypeHint::String, TypeHint::Bool => '(' . $left . ' === ' . $right . ')',
+                default => null,
+            };
+        }
+
+        return null;
     }
 
     // ───────────────── Scope Management ─────────────────
@@ -1022,13 +1722,336 @@ final class PhpTranspiler
                 if ($stmt->alternate !== null) {
                     $vars = array_merge($vars, $this->collectVarDecls([$stmt->alternate]));
                 }
+            } elseif ($stmt instanceof ForOfStmt) {
+                $vars[] = $stmt->name;
+                $vars = array_merge($vars, $this->collectVarDecls([$stmt->body]));
+            } elseif ($stmt instanceof ForInStmt) {
+                $vars[] = $stmt->name;
+                $vars = array_merge($vars, $this->collectVarDecls([$stmt->body]));
+            } elseif ($stmt instanceof DestructuringDeclaration) {
+                foreach ($stmt->bindings as $b) {
+                    $vars[] = $b['name'];
+                }
+                if ($stmt->restName !== null) {
+                    $vars[] = $stmt->restName;
+                }
             } elseif ($stmt instanceof WhileStmt) {
+                $vars = array_merge($vars, $this->collectVarDecls([$stmt->body]));
+            } elseif ($stmt instanceof DoWhileStmt) {
                 $vars = array_merge($vars, $this->collectVarDecls([$stmt->body]));
             } elseif ($stmt instanceof BlockStmt) {
                 $vars = array_merge($vars, $this->collectVarDecls($stmt->statements));
+            } elseif ($stmt instanceof SwitchStmt) {
+                foreach ($stmt->cases as $case) {
+                    $vars = array_merge($vars, $this->collectVarDecls($case->consequent));
+                }
+            } elseif ($stmt instanceof TryCatchStmt) {
+                $vars = array_merge($vars, $this->collectVarDecls([$stmt->block]));
+                if ($stmt->handler !== null) {
+                    $vars = array_merge($vars, $this->collectVarDecls([$stmt->handler->body]));
+                }
             }
         }
         return array_unique($vars);
+    }
+
+    // ───────────────── Function Boxing Analysis ─────────────────
+
+    private function collectBoxedFunctionBindings(array $stmts): void
+    {
+        foreach ($stmts as $stmt) {
+            $this->walkStmtForBoxedFunctions($stmt);
+        }
+        $this->propagateBoxedFunctionAliases();
+    }
+
+    private function markFunctionBinding(string $name): void
+    {
+        $this->boxedFunctionBindings[$name] = true;
+    }
+
+    private function addFunctionBindingAlias(string $target, string $source): void
+    {
+        $this->functionBindingAliases[$target][$source] = true;
+    }
+
+    private function walkStmtForBoxedFunctions(Stmt $stmt): void
+    {
+        if ($stmt instanceof ExpressionStmt) {
+            $this->walkExprForBoxedFunctions($stmt->expression);
+            return;
+        }
+
+        if ($stmt instanceof VarDeclaration) {
+            if ($stmt->initializer !== null) {
+                if ($stmt->initializer instanceof Identifier) {
+                    $this->addFunctionBindingAlias($stmt->name, $stmt->initializer->name);
+                }
+                $this->walkExprForBoxedFunctions($stmt->initializer);
+            }
+            return;
+        }
+
+        if ($stmt instanceof ReturnStmt) {
+            if ($stmt->value !== null) {
+                $this->walkExprForBoxedFunctions($stmt->value);
+            }
+            return;
+        }
+
+        if ($stmt instanceof IfStmt) {
+            $this->walkExprForBoxedFunctions($stmt->condition);
+            $this->walkStmtForBoxedFunctions($stmt->consequent);
+            if ($stmt->alternate !== null) {
+                $this->walkStmtForBoxedFunctions($stmt->alternate);
+            }
+            return;
+        }
+
+        if ($stmt instanceof WhileStmt) {
+            $this->walkExprForBoxedFunctions($stmt->condition);
+            $this->walkStmtForBoxedFunctions($stmt->body);
+            return;
+        }
+
+        if ($stmt instanceof ForStmt) {
+            if ($stmt->init instanceof VarDeclaration && $stmt->init->initializer !== null) {
+                $this->walkExprForBoxedFunctions($stmt->init->initializer);
+            } elseif ($stmt->init instanceof ExpressionStmt) {
+                $this->walkExprForBoxedFunctions($stmt->init->expression);
+            }
+            if ($stmt->condition !== null) {
+                $this->walkExprForBoxedFunctions($stmt->condition);
+            }
+            if ($stmt->update !== null) {
+                $this->walkExprForBoxedFunctions($stmt->update);
+            }
+            $this->walkStmtForBoxedFunctions($stmt->body);
+            return;
+        }
+
+        if ($stmt instanceof ForOfStmt) {
+            $this->walkExprForBoxedFunctions($stmt->iterable);
+            $this->walkStmtForBoxedFunctions($stmt->body);
+            return;
+        }
+
+        if ($stmt instanceof ForInStmt) {
+            $this->walkExprForBoxedFunctions($stmt->object);
+            $this->walkStmtForBoxedFunctions($stmt->body);
+            return;
+        }
+
+        if ($stmt instanceof DestructuringDeclaration) {
+            $this->walkExprForBoxedFunctions($stmt->initializer);
+            foreach ($stmt->bindings as $binding) {
+                if (($binding['default'] ?? null) instanceof Expr) {
+                    $this->walkExprForBoxedFunctions($binding['default']);
+                }
+            }
+            return;
+        }
+
+        if ($stmt instanceof DoWhileStmt) {
+            $this->walkStmtForBoxedFunctions($stmt->body);
+            $this->walkExprForBoxedFunctions($stmt->condition);
+            return;
+        }
+
+        if ($stmt instanceof BlockStmt) {
+            foreach ($stmt->statements as $nested) {
+                $this->walkStmtForBoxedFunctions($nested);
+            }
+            return;
+        }
+
+        if ($stmt instanceof SwitchStmt) {
+            $this->walkExprForBoxedFunctions($stmt->discriminant);
+            foreach ($stmt->cases as $case) {
+                if ($case->test !== null) {
+                    $this->walkExprForBoxedFunctions($case->test);
+                }
+                foreach ($case->consequent as $nested) {
+                    $this->walkStmtForBoxedFunctions($nested);
+                }
+            }
+            return;
+        }
+
+        if ($stmt instanceof ThrowStmt) {
+            $this->walkExprForBoxedFunctions($stmt->argument);
+            return;
+        }
+
+        if ($stmt instanceof TryCatchStmt) {
+            foreach ($stmt->block->statements as $nested) {
+                $this->walkStmtForBoxedFunctions($nested);
+            }
+            if ($stmt->handler !== null) {
+                foreach ($stmt->handler->body->statements as $nested) {
+                    $this->walkStmtForBoxedFunctions($nested);
+                }
+            }
+            return;
+        }
+
+        if ($stmt instanceof FunctionDeclaration) {
+            foreach ($stmt->body as $nested) {
+                $this->walkStmtForBoxedFunctions($nested);
+            }
+        }
+    }
+
+    private function walkExprForBoxedFunctions(Expr $expr): void
+    {
+        if ($expr instanceof BinaryExpr) {
+            $this->walkExprForBoxedFunctions($expr->left);
+            $this->walkExprForBoxedFunctions($expr->right);
+            if ($expr->operator === 'instanceof' && $expr->right instanceof Identifier) {
+                $this->markFunctionBinding($expr->right->name);
+            }
+            return;
+        }
+
+        if ($expr instanceof LogicalExpr) {
+            $this->walkExprForBoxedFunctions($expr->left);
+            $this->walkExprForBoxedFunctions($expr->right);
+            return;
+        }
+
+        if ($expr instanceof AssignExpr) {
+            if ($expr->operator === '=' && $expr->value instanceof Identifier) {
+                $this->addFunctionBindingAlias($expr->name, $expr->value->name);
+            }
+            $this->walkExprForBoxedFunctions($expr->value);
+            return;
+        }
+
+        if ($expr instanceof UnaryExpr) {
+            $this->walkExprForBoxedFunctions($expr->operand);
+            return;
+        }
+
+        if ($expr instanceof TypeofExpr) {
+            $this->walkExprForBoxedFunctions($expr->operand);
+            return;
+        }
+
+        if ($expr instanceof VoidExpr) {
+            $this->walkExprForBoxedFunctions($expr->operand);
+            return;
+        }
+
+        if ($expr instanceof DeleteExpr) {
+            $this->walkExprForBoxedFunctions($expr->operand);
+            return;
+        }
+
+        if ($expr instanceof UpdateExpr) {
+            $this->walkExprForBoxedFunctions($expr->argument);
+            return;
+        }
+
+        if ($expr instanceof CallExpr) {
+            $this->walkExprForBoxedFunctions($expr->callee);
+            foreach ($expr->arguments as $arg) {
+                $this->walkExprForBoxedFunctions($arg instanceof SpreadElement ? $arg->argument : $arg);
+            }
+            return;
+        }
+
+        if ($expr instanceof NewExpr) {
+            if ($expr->callee instanceof Identifier) {
+                $this->markFunctionBinding($expr->callee->name);
+            } else {
+                $this->walkExprForBoxedFunctions($expr->callee);
+            }
+            foreach ($expr->arguments as $arg) {
+                $this->walkExprForBoxedFunctions($arg instanceof SpreadElement ? $arg->argument : $arg);
+            }
+            return;
+        }
+
+        if ($expr instanceof MemberExpr) {
+            if ($expr->object instanceof Identifier) {
+                $this->markFunctionBinding($expr->object->name);
+            } else {
+                $this->walkExprForBoxedFunctions($expr->object);
+            }
+            if ($expr->computed) {
+                $this->walkExprForBoxedFunctions($expr->property);
+            }
+            return;
+        }
+
+        if ($expr instanceof MemberAssignExpr) {
+            if ($expr->object instanceof Identifier) {
+                $this->markFunctionBinding($expr->object->name);
+            } else {
+                $this->walkExprForBoxedFunctions($expr->object);
+            }
+            if ($expr->computed) {
+                $this->walkExprForBoxedFunctions($expr->property);
+            }
+            $this->walkExprForBoxedFunctions($expr->value);
+            return;
+        }
+
+        if ($expr instanceof ConditionalExpr) {
+            $this->walkExprForBoxedFunctions($expr->condition);
+            $this->walkExprForBoxedFunctions($expr->consequent);
+            $this->walkExprForBoxedFunctions($expr->alternate);
+            return;
+        }
+
+        if ($expr instanceof ArrayLiteral) {
+            foreach ($expr->elements as $element) {
+                $this->walkExprForBoxedFunctions($element instanceof SpreadElement ? $element->argument : $element);
+            }
+            return;
+        }
+
+        if ($expr instanceof ObjectLiteral) {
+            foreach ($expr->properties as $property) {
+                if ($property->computed && $property->computedKey !== null) {
+                    $this->walkExprForBoxedFunctions($property->computedKey);
+                }
+                $this->walkExprForBoxedFunctions($property->value);
+            }
+            return;
+        }
+
+        if ($expr instanceof TemplateLiteral) {
+            foreach ($expr->expressions as $embedded) {
+                $this->walkExprForBoxedFunctions($embedded);
+            }
+            return;
+        }
+
+        if ($expr instanceof FunctionExpr) {
+            foreach ($expr->body as $stmt) {
+                $this->walkStmtForBoxedFunctions($stmt);
+            }
+        }
+    }
+
+    private function propagateBoxedFunctionAliases(): void
+    {
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($this->functionBindingAliases as $target => $sources) {
+                if (!isset($this->boxedFunctionBindings[$target])) {
+                    continue;
+                }
+                foreach ($sources as $source => $_) {
+                    if (!isset($this->boxedFunctionBindings[$source])) {
+                        $this->boxedFunctionBindings[$source] = true;
+                        $changed = true;
+                    }
+                }
+            }
+        }
     }
 
     // ───────────────── Helpers ─────────────────
@@ -1076,7 +2099,10 @@ final class PhpTranspiler
     /** Generate a use() clause capturing all scope variables by reference */
     private function makeUseClause(): string
     {
-        $vars = $this->getAllScopeVars();
+        $vars = array_values(array_unique(array_map(
+            fn(string $name) => $this->resolveVar($name),
+            $this->getAllScopeVars()
+        )));
         if (empty($vars)) {
             return '';
         }
@@ -1094,6 +2120,14 @@ final class PhpTranspiler
 
     private function escapeStr(string $s): string
     {
+        if (str_contains($s, "\n") || str_contains($s, "\r") || str_contains($s, "\t")) {
+            $escaped = str_replace(
+                ["\\", "\$", "\"", "\n", "\r", "\t"],
+                ["\\\\", "\\\$", "\\\"", "\\n", "\\r", "\\t"],
+                $s,
+            );
+            return '"' . $escaped . '"';
+        }
         return "'" . addcslashes($s, "'\\") . "'";
     }
 
@@ -1149,6 +2183,7 @@ final class PhpTranspiler
             $e instanceof TemplateLiteral => TypeHint::String,
             $e instanceof BooleanLiteral => TypeHint::Bool,
             $e instanceof ArrayLiteral => TypeHint::Array_,
+            $e instanceof ObjectLiteral => TypeHint::Object_,
 
             // Arithmetic always produces numeric
             $e instanceof BinaryExpr && in_array($e->operator, ['-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>'], true)
@@ -1311,6 +2346,22 @@ final class PhpTranspiler
                 $this->walkExprForNames($s->update, $referenced, $declared);
             }
             $this->walkStmtForNames($s->body, $referenced, $declared);
+        } elseif ($s instanceof ForOfStmt) {
+            $declared[$s->name] = true;
+            $this->walkExprForNames($s->iterable, $referenced, $declared);
+            $this->walkStmtForNames($s->body, $referenced, $declared);
+        } elseif ($s instanceof ForInStmt) {
+            $declared[$s->name] = true;
+            $this->walkExprForNames($s->object, $referenced, $declared);
+            $this->walkStmtForNames($s->body, $referenced, $declared);
+        } elseif ($s instanceof DestructuringDeclaration) {
+            foreach ($s->bindings as $b) {
+                $declared[$b['name']] = true;
+            }
+            if ($s->restName !== null) {
+                $declared[$s->restName] = true;
+            }
+            $this->walkExprForNames($s->initializer, $referenced, $declared);
         } elseif ($s instanceof DoWhileStmt) {
             $this->walkStmtForNames($s->body, $referenced, $declared);
             $this->walkExprForNames($s->condition, $referenced, $declared);

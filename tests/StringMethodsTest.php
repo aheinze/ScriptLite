@@ -4,37 +4,28 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class StringMethodsTest extends TestCase
+class StringMethodsTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ charAt / charCodeAt ═══════════════════
 
     public function testCharAt(): void
     {
-        self::assertSame('h', $this->engine->eval('"hello".charAt(0)'));
-        self::assertSame('e', $this->engine->eval('"hello".charAt(1)'));
-        self::assertSame('o', $this->engine->eval('"hello".charAt(4)'));
+        $this->assertBothBackends('"hello".charAt(0)', 'h');
+        $this->assertBothBackends('"hello".charAt(1)', 'e');
+        $this->assertBothBackends('"hello".charAt(4)', 'o');
     }
 
     public function testCharAtOutOfBounds(): void
     {
-        self::assertSame('', $this->engine->eval('"hello".charAt(10)'));
-        self::assertSame('', $this->engine->eval('"hello".charAt(-1)'));
+        $this->assertBothBackends('"hello".charAt(10)', '');
+        $this->assertBothBackends('"hello".charAt(-1)', '');
     }
 
     public function testCharCodeAt(): void
     {
-        self::assertSame(104, $this->engine->eval('"hello".charCodeAt(0)')); // 'h'
-        self::assertSame(65, $this->engine->eval('"A".charCodeAt(0)'));
+        $this->assertBothBackends('"hello".charCodeAt(0)', 104); // 'h'
+        $this->assertBothBackends('"A".charCodeAt(0)', 65);
     }
 
     public function testCharCodeAtOutOfBounds(): void
@@ -47,212 +38,207 @@ final class StringMethodsTest extends TestCase
 
     public function testIndexOf(): void
     {
-        self::assertSame(2, $this->engine->eval('"hello world".indexOf("llo")'));
-        self::assertSame(-1, $this->engine->eval('"hello".indexOf("xyz")'));
+        $this->assertBothBackends('"hello world".indexOf("llo")', 2);
+        $this->assertBothBackends('"hello".indexOf("xyz")', -1);
     }
 
     public function testIndexOfFromIndex(): void
     {
-        self::assertSame(6, $this->engine->eval('"hello hello".indexOf("hello", 1)'));
+        $this->assertBothBackends('"hello hello".indexOf("hello", 1)', 6);
     }
 
     public function testLastIndexOf(): void
     {
-        self::assertSame(6, $this->engine->eval('"hello hello".lastIndexOf("hello")'));
-        self::assertSame(-1, $this->engine->eval('"hello".lastIndexOf("xyz")'));
+        $this->assertBothBackends('"hello hello".lastIndexOf("hello")', 6);
+        $this->assertBothBackends('"hello".lastIndexOf("xyz")', -1);
     }
 
     public function testIncludes(): void
     {
-        self::assertTrue($this->engine->eval('"hello world".includes("world")'));
-        self::assertFalse($this->engine->eval('"hello world".includes("xyz")'));
+        $this->assertBothBackends('"hello world".includes("world")', true);
+        $this->assertBothBackends('"hello world".includes("xyz")', false);
     }
 
     public function testIncludesFromIndex(): void
     {
-        self::assertFalse($this->engine->eval('"hello".includes("hel", 1)'));
-        self::assertTrue($this->engine->eval('"hello".includes("ell", 1)'));
+        $this->assertBothBackends('"hello".includes("hel", 1)', false);
+        $this->assertBothBackends('"hello".includes("ell", 1)', true);
     }
 
     // ═══════════════════ startsWith / endsWith ═══════════════════
 
     public function testStartsWith(): void
     {
-        self::assertTrue($this->engine->eval('"hello world".startsWith("hello")'));
-        self::assertFalse($this->engine->eval('"hello world".startsWith("world")'));
+        $this->assertBothBackends('"hello world".startsWith("hello")', true);
+        $this->assertBothBackends('"hello world".startsWith("world")', false);
     }
 
     public function testStartsWithPosition(): void
     {
-        self::assertTrue($this->engine->eval('"hello world".startsWith("world", 6)'));
+        $this->assertBothBackends('"hello world".startsWith("world", 6)', true);
     }
 
     public function testEndsWith(): void
     {
-        self::assertTrue($this->engine->eval('"hello world".endsWith("world")'));
-        self::assertFalse($this->engine->eval('"hello world".endsWith("hello")'));
+        $this->assertBothBackends('"hello world".endsWith("world")', true);
+        $this->assertBothBackends('"hello world".endsWith("hello")', false);
     }
 
     public function testEndsWithEndPosition(): void
     {
-        self::assertTrue($this->engine->eval('"hello world".endsWith("hello", 5)'));
+        $this->assertBothBackends('"hello world".endsWith("hello", 5)', true);
     }
 
     // ═══════════════════ slice / substring ═══════════════════
 
     public function testSlice(): void
     {
-        self::assertSame('llo', $this->engine->eval('"hello".slice(2)'));
-        self::assertSame('ell', $this->engine->eval('"hello".slice(1, 4)'));
+        $this->assertBothBackends('"hello".slice(2)', 'llo');
+        $this->assertBothBackends('"hello".slice(1, 4)', 'ell');
     }
 
     public function testSliceNegative(): void
     {
-        self::assertSame('lo', $this->engine->eval('"hello".slice(-2)'));
-        self::assertSame('ell', $this->engine->eval('"hello".slice(1, -1)'));
+        $this->assertBothBackends('"hello".slice(-2)', 'lo');
+        $this->assertBothBackends('"hello".slice(1, -1)', 'ell');
     }
 
     public function testSubstring(): void
     {
-        self::assertSame('ello', $this->engine->eval('"hello".substring(1)'));
-        self::assertSame('ell', $this->engine->eval('"hello".substring(1, 4)'));
+        $this->assertBothBackends('"hello".substring(1)', 'ello');
+        $this->assertBothBackends('"hello".substring(1, 4)', 'ell');
     }
 
     public function testSubstringSwapsIfStartGreaterThanEnd(): void
     {
-        self::assertSame('ell', $this->engine->eval('"hello".substring(4, 1)'));
+        $this->assertBothBackends('"hello".substring(4, 1)', 'ell');
     }
 
     // ═══════════════════ toUpperCase / toLowerCase ═══════════════════
 
     public function testToUpperCase(): void
     {
-        self::assertSame('HELLO', $this->engine->eval('"hello".toUpperCase()'));
-        self::assertSame('HELLO WORLD', $this->engine->eval('"Hello World".toUpperCase()'));
+        $this->assertBothBackends('"hello".toUpperCase()', 'HELLO');
+        $this->assertBothBackends('"Hello World".toUpperCase()', 'HELLO WORLD');
     }
 
     public function testToLowerCase(): void
     {
-        self::assertSame('hello', $this->engine->eval('"HELLO".toLowerCase()'));
-        self::assertSame('hello world', $this->engine->eval('"Hello World".toLowerCase()'));
+        $this->assertBothBackends('"HELLO".toLowerCase()', 'hello');
+        $this->assertBothBackends('"Hello World".toLowerCase()', 'hello world');
     }
 
     // ═══════════════════ trim / trimStart / trimEnd ═══════════════════
 
     public function testTrim(): void
     {
-        self::assertSame('hello', $this->engine->eval('"  hello  ".trim()'));
+        $this->assertBothBackends('"  hello  ".trim()', 'hello');
     }
 
     public function testTrimStart(): void
     {
-        self::assertSame('hello  ', $this->engine->eval('"  hello  ".trimStart()'));
+        $this->assertBothBackends('"  hello  ".trimStart()', 'hello  ');
     }
 
     public function testTrimEnd(): void
     {
-        self::assertSame('  hello', $this->engine->eval('"  hello  ".trimEnd()'));
+        $this->assertBothBackends('"  hello  ".trimEnd()', '  hello');
     }
 
     // ═══════════════════ split ═══════════════════
 
     public function testSplit(): void
     {
-        $result = $this->engine->eval('"a,b,c".split(",")');
-        self::assertSame(['a', 'b', 'c'], $result);
+        $this->assertBothBackends('"a,b,c".split(",")', ['a', 'b', 'c']);
     }
 
     public function testSplitWithLimit(): void
     {
-        $result = $this->engine->eval('"a,b,c,d".split(",", 2)');
-        self::assertSame(['a', 'b'], $result);
+        $this->assertBothBackends('"a,b,c,d".split(",", 2)', ['a', 'b']);
     }
 
     public function testSplitEmptySeparator(): void
     {
-        $result = $this->engine->eval('"abc".split("")');
-        self::assertSame(['a', 'b', 'c'], $result);
+        $this->assertBothBackends('"abc".split("")', ['a', 'b', 'c']);
     }
 
     public function testSplitNoArgs(): void
     {
-        $result = $this->engine->eval('"hello world".split()');
-        self::assertSame(['hello world'], $result);
+        $this->assertBothBackends('"hello world".split()', ['hello world']);
     }
 
     // ═══════════════════ replace ═══════════════════
 
     public function testReplace(): void
     {
-        self::assertSame('hxllo', $this->engine->eval('"hello".replace("e", "x")'));
+        $this->assertBothBackends('"hello".replace("e", "x")', 'hxllo');
     }
 
     public function testReplaceFirstOnly(): void
     {
         // JS replace() only replaces first occurrence
-        self::assertSame('hxllo hello', $this->engine->eval('"hello hello".replace("e", "x")'));
+        $this->assertBothBackends('"hello hello".replace("e", "x")', 'hxllo hello');
     }
 
     public function testReplaceNotFound(): void
     {
-        self::assertSame('hello', $this->engine->eval('"hello".replace("xyz", "abc")'));
+        $this->assertBothBackends('"hello".replace("xyz", "abc")', 'hello');
     }
 
     // ═══════════════════ repeat ═══════════════════
 
     public function testRepeat(): void
     {
-        self::assertSame('abcabcabc', $this->engine->eval('"abc".repeat(3)'));
-        self::assertSame('', $this->engine->eval('"abc".repeat(0)'));
+        $this->assertBothBackends('"abc".repeat(3)', 'abcabcabc');
+        $this->assertBothBackends('"abc".repeat(0)', '');
     }
 
     // ═══════════════════ padStart / padEnd ═══════════════════
 
     public function testPadStart(): void
     {
-        self::assertSame('00005', $this->engine->eval('"5".padStart(5, "0")'));
-        self::assertSame('     5', $this->engine->eval('"5".padStart(6)'));
+        $this->assertBothBackends('"5".padStart(5, "0")', '00005');
+        $this->assertBothBackends('"5".padStart(6)', '     5');
     }
 
     public function testPadEnd(): void
     {
-        self::assertSame('50000', $this->engine->eval('"5".padEnd(5, "0")'));
-        self::assertSame('hello...', $this->engine->eval('"hello".padEnd(8, ".")'));
+        $this->assertBothBackends('"5".padEnd(5, "0")', '50000');
+        $this->assertBothBackends('"hello".padEnd(8, ".")', 'hello...');
     }
 
     public function testPadStartNoOpWhenLongEnough(): void
     {
-        self::assertSame('hello', $this->engine->eval('"hello".padStart(3, "x")'));
+        $this->assertBothBackends('"hello".padStart(3, "x")', 'hello');
     }
 
     // ═══════════════════ concat ═══════════════════
 
     public function testConcat(): void
     {
-        self::assertSame('hello world', $this->engine->eval('"hello".concat(" ", "world")'));
-        self::assertSame('abc', $this->engine->eval('"a".concat("b", "c")'));
+        $this->assertBothBackends('"hello".concat(" ", "world")', 'hello world');
+        $this->assertBothBackends('"a".concat("b", "c")', 'abc');
     }
 
     // ═══════════════════ Chaining ═══════════════════
 
     public function testMethodChaining(): void
     {
-        self::assertSame('HELLO', $this->engine->eval('"  hello  ".trim().toUpperCase()'));
+        $this->assertBothBackends('"  hello  ".trim().toUpperCase()', 'HELLO');
     }
 
     public function testSplitMapChain(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             "1,2,3".split(",").map(function(x) { return x + "!"; })
-        ');
-        self::assertSame(['1!', '2!', '3!'], $result);
+        ', ['1!', '2!', '3!']);
     }
 
     // ═══════════════════ String.fromCharCode ═══════════════════
 
     public function testStringFromCharCode(): void
     {
-        self::assertSame('A', $this->engine->eval('String.fromCharCode(65)'));
-        self::assertSame('ABC', $this->engine->eval('String.fromCharCode(65, 66, 67)'));
+        $this->assertBothBackends('String.fromCharCode(65)', 'A');
+        $this->assertBothBackends('String.fromCharCode(65, 66, 67)', 'ABC');
     }
 }

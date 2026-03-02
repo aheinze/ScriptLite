@@ -7,7 +7,9 @@ namespace ScriptLite\Ast;
 final readonly class ObjectProperty
 {
     public function __construct(
-        public string $key,
+        public ?string $key,
         public Expr $value,
+        public bool $computed = false,
+        public ?Expr $computedKey = null,
     ) {}
 }

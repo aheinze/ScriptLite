@@ -4,55 +4,44 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class GlobalsTest extends TestCase
+class GlobalsTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Array Static Methods ═══════════════════
 
     public function testArrayIsArray(): void
     {
-        self::assertTrue($this->engine->eval('Array.isArray([1, 2, 3])'));
-        self::assertTrue($this->engine->eval('Array.isArray([])'));
+        $this->assertBothBackends('Array.isArray([1, 2, 3])', true);
+        $this->assertBothBackends('Array.isArray([])', true);
     }
 
     public function testArrayIsArrayFalse(): void
     {
-        self::assertFalse($this->engine->eval('Array.isArray({})'));
-        self::assertFalse($this->engine->eval('Array.isArray("hello")'));
-        self::assertFalse($this->engine->eval('Array.isArray(42)'));
-        self::assertFalse($this->engine->eval('Array.isArray(null)'));
+        // VM-only: Array.isArray({}) — transpiler maps {} to [] (both are PHP arrays)
+        $this->assertVm('Array.isArray({})', false);
+        $this->assertBothBackends('Array.isArray("hello")', false);
+        $this->assertBothBackends('Array.isArray(42)', false);
+        $this->assertBothBackends('Array.isArray(null)', false);
     }
 
     public function testArrayFrom(): void
     {
-        $result = $this->engine->eval('
+        $this->assertBothBackends('
             var original = [1, 2, 3];
             var copy = Array.from(original);
             original.push(4);
             copy;
-        ');
-        self::assertSame([1, 2, 3], $result); // copy is independent
+        ', [1, 2, 3]);
     }
 
     public function testArrayOf(): void
     {
-        $result = $this->engine->eval('Array.of(1, 2, 3)');
-        self::assertSame([1, 2, 3], $result);
+        $this->assertBothBackends('Array.of(1, 2, 3)', [1, 2, 3]);
     }
 
     public function testArrayOfSingle(): void
     {
-        $result = $this->engine->eval('Array.of(5)');
-        self::assertSame([5], $result);
+        $this->assertBothBackends('Array.of(5)', [5]);
     }
 
     // ═══════════════════ Namespace Globals (console, Math) ═══════════════════
@@ -65,33 +54,33 @@ final class GlobalsTest extends TestCase
 
     public function testMathFloorNamespace(): void
     {
-        self::assertSame(3, $this->engine->eval('Math.floor(3.7)'));
+        $this->assertBothBackends('Math.floor(3.7)', 3);
     }
 
     public function testMathCeilNamespace(): void
     {
-        self::assertSame(4, $this->engine->eval('Math.ceil(3.2)'));
+        $this->assertBothBackends('Math.ceil(3.2)', 4);
     }
 
     public function testMathAbsNamespace(): void
     {
-        self::assertSame(5, $this->engine->eval('Math.abs(-5)'));
+        $this->assertBothBackends('Math.abs(-5)', 5);
     }
 
     public function testMathMaxNamespace(): void
     {
-        self::assertSame(10, $this->engine->eval('Math.max(3, 10)'));
+        $this->assertBothBackends('Math.max(3, 10)', 10);
     }
 
     public function testMathMinNamespace(): void
     {
-        self::assertSame(3, $this->engine->eval('Math.min(3, 10)'));
+        $this->assertBothBackends('Math.min(3, 10)', 3);
     }
 
     public function testMathRound(): void
     {
-        self::assertSame(4, $this->engine->eval('Math.round(3.7)'));
-        self::assertSame(3, $this->engine->eval('Math.round(3.2)'));
+        $this->assertBothBackends('Math.round(3.7)', 4);
+        $this->assertBothBackends('Math.round(3.2)', 3);
     }
 
     public function testMathPI(): void

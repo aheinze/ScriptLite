@@ -73,7 +73,9 @@ final class VirtualMachine
         $env = $globalEnv ?? $this->createGlobalEnvironment();
 
         $this->pushFrame(
-            $script->main->code,
+            $script->main->ops,
+            $script->main->opA,
+            $script->main->opB,
             $script->main->constants,
             $script->main->names,
             $env,
@@ -107,7 +109,9 @@ final class VirtualMachine
         $stack = &$this->stack;
         $sp = $this->sp;
         $frame = $this->frame;
-        $code = $frame->code;
+        $ops = $frame->ops;
+        $opA = $frame->opA;
+        $opB = $frame->opB;
         $constants = $frame->constants;
         $names = $frame->names;
         $env = $frame->env;
@@ -117,13 +121,13 @@ final class VirtualMachine
         while (true) {
           try {
             while (true) {
-            $instr = $code[$ip++];
+            $ci = $ip++;
 
-            switch ($instr->op) {
+            switch ($ops[$ci]) {
 
             // ── Constants & Stack ──
             case OpCode::Const:
-                $stack[$sp++] = $constants[$instr->operandA];
+                $stack[$sp++] = $constants[$opA[$ci]];
                 break;
             case OpCode::Pop:
                 --$sp;
@@ -133,23 +137,36 @@ final class VirtualMachine
                 $sp++;
                 break;
 
-            // ── Arithmetic (inlined — no closure allocation) ──
+            // ── Arithmetic (inlined type guards — fast path avoids method calls) ──
             case OpCode::Add:
                 $b = $stack[--$sp];
-                $a = $stack[--$sp];
+                $a = $stack[$sp - 1];
+                if (is_int($a)) {
+                    if (is_int($b)) { $stack[$sp - 1] = $a + $b; break; }
+                    if (is_float($b)) { $stack[$sp - 1] = $a + $b; break; }
+                } elseif (is_float($a) && (is_int($b) || is_float($b))) {
+                    $stack[$sp - 1] = $a + $b; break;
+                }
+                // Slow path: ToPrimitive + type coercion
+                if ($a instanceof JsArray || $a instanceof JsObject) { $a = $this->toJsString($a); }
+                if ($b instanceof JsArray || $b instanceof JsObject) { $b = $this->toJsString($b); }
                 if (is_string($a) || is_string($b)) {
-                    $stack[$sp++] = $this->toJsString($a) . $this->toJsString($b);
+                    $stack[$sp - 1] = $this->toJsString($a) . $this->toJsString($b);
                 } else {
-                    $stack[$sp++] = $this->toNumber($a) + $this->toNumber($b);
+                    $stack[$sp - 1] = $this->toNumber($a) + $this->toNumber($b);
                 }
                 break;
             case OpCode::Sub:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] -= $b;
+                $a = $stack[$sp - 1];
+                $stack[$sp - 1] = (is_int($a) || is_float($a) ? $a : $this->toNumber($a))
+                                - (is_int($b) || is_float($b) ? $b : $this->toNumber($b));
                 break;
             case OpCode::Mul:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] *= $b;
+                $a = $stack[$sp - 1];
+                $stack[$sp - 1] = (is_int($a) || is_float($a) ? $a : $this->toNumber($a))
+                                * (is_int($b) || is_float($b) ? $b : $this->toNumber($b));
                 break;
             case OpCode::Div:
                 $b = $stack[--$sp];
@@ -160,16 +177,30 @@ final class VirtualMachine
                 break;
             case OpCode::Mod:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = fmod($stack[$sp - 1], $b);
+                $a = $stack[$sp - 1];
+                $stack[$sp - 1] = fmod(
+                    is_int($a) || is_float($a) ? $a : $this->toNumber($a),
+                    is_int($b) || is_float($b) ? $b : $this->toNumber($b),
+                );
                 break;
             case OpCode::Negate:
-                $stack[$sp - 1] = -$stack[$sp - 1];
+                $a = $stack[$sp - 1];
+                $stack[$sp - 1] = -(is_int($a) || is_float($a) ? $a : $this->toNumber($a));
                 break;
             case OpCode::Not:
-                $stack[$sp - 1] = !$this->isTruthy($stack[$sp - 1]);
+                $v = $stack[$sp - 1];
+                $stack[$sp - 1] = is_bool($v) ? !$v : !$this->isTruthy($v);
                 break;
             case OpCode::Typeof:
                 $stack[$sp - 1] = $this->jsTypeof($stack[$sp - 1]);
+                break;
+            case OpCode::TypeofVar:
+                // Safe typeof on identifier — returns "undefined" if variable not defined
+                if ($env->has($names[$opA[$ci]])) {
+                    $stack[$sp++] = $this->jsTypeof($env->get($names[$opA[$ci]]));
+                } else {
+                    $stack[$sp++] = 'undefined';
+                }
                 break;
             case OpCode::Exp:
                 $b = $stack[--$sp];
@@ -209,11 +240,11 @@ final class VirtualMachine
             // ── Comparison (inlined — no closure allocation) ──
             case OpCode::Eq:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] == $b;
+                $stack[$sp - 1] = $this->jsLooseEqual($stack[$sp - 1], $b);
                 break;
             case OpCode::Neq:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] != $b;
+                $stack[$sp - 1] = !$this->jsLooseEqual($stack[$sp - 1], $b);
                 break;
             case OpCode::StrictEq:
                 $b = $stack[--$sp];
@@ -225,19 +256,36 @@ final class VirtualMachine
                 break;
             case OpCode::Lt:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] < $b;
+                $a = $stack[$sp - 1];
+                // JS: convert booleans to numbers, objects to NaN for relational comparison
+                if (is_bool($a)) { $a = $a ? 1 : 0; }
+                if (is_bool($b)) { $b = $b ? 1 : 0; }
+                if (is_object($a) || is_object($b)) { $stack[$sp - 1] = false; break; }
+                $stack[$sp - 1] = $a < $b;
                 break;
             case OpCode::Lte:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] <= $b;
+                $a = $stack[$sp - 1];
+                if (is_bool($a)) { $a = $a ? 1 : 0; }
+                if (is_bool($b)) { $b = $b ? 1 : 0; }
+                if (is_object($a) || is_object($b)) { $stack[$sp - 1] = false; break; }
+                $stack[$sp - 1] = $a <= $b;
                 break;
             case OpCode::Gt:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] > $b;
+                $a = $stack[$sp - 1];
+                if (is_bool($a)) { $a = $a ? 1 : 0; }
+                if (is_bool($b)) { $b = $b ? 1 : 0; }
+                if (is_object($a) || is_object($b)) { $stack[$sp - 1] = false; break; }
+                $stack[$sp - 1] = $a > $b;
                 break;
             case OpCode::Gte:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = $stack[$sp - 1] >= $b;
+                $a = $stack[$sp - 1];
+                if (is_bool($a)) { $a = $a ? 1 : 0; }
+                if (is_bool($b)) { $b = $b ? 1 : 0; }
+                if (is_object($a) || is_object($b)) { $stack[$sp - 1] = false; break; }
+                $stack[$sp - 1] = $a >= $b;
                 break;
 
             // ── Property tests / delete ──
@@ -274,46 +322,50 @@ final class VirtualMachine
 
             // ── Variables ──
             case OpCode::GetLocal:
-                $stack[$sp++] = $env->get($names[$instr->operandA]);
+                $stack[$sp++] = $env->get($names[$opA[$ci]]);
                 break;
             case OpCode::SetLocal:
-                $env->set($names[$instr->operandA], $stack[--$sp]);
+                $env->set($names[$opA[$ci]], $stack[--$sp]);
                 break;
             case OpCode::DefineVar:
-                $env->define($names[$instr->operandA], $stack[--$sp], $instr->operandB === 2);
+                $env->define($names[$opA[$ci]], $stack[--$sp], $opB[$ci] === 2);
                 break;
             case OpCode::GetReg:
-                $stack[$sp++] = $regs[$instr->operandA];
+                $stack[$sp++] = $regs[$opA[$ci]];
                 break;
             case OpCode::SetReg:
-                $regs[$instr->operandA] = $stack[--$sp];
+                $regs[$opA[$ci]] = $stack[--$sp];
                 break;
 
             // ── Control Flow ──
             case OpCode::Jump:
-                $ip = $instr->operandA;
+                $ip = $opA[$ci];
                 break;
             case OpCode::JumpIfFalse:
-                if (!$this->isTruthy($stack[--$sp])) {
-                    $ip = $instr->operandA;
+                $v = $stack[--$sp];
+                if ($v === false || $v === 0 || $v === 0.0 || $v === '' || $v === null || $v === JsUndefined::Value
+                    || (is_float($v) && is_nan($v))) {
+                    $ip = $opA[$ci];
                 }
                 break;
             case OpCode::JumpIfTrue:
-                if ($this->isTruthy($stack[--$sp])) {
-                    $ip = $instr->operandA;
+                $v = $stack[--$sp];
+                if ($v !== false && $v !== 0 && $v !== 0.0 && $v !== '' && $v !== null && $v !== JsUndefined::Value
+                    && !(is_float($v) && is_nan($v))) {
+                    $ip = $opA[$ci];
                 }
                 break;
             case OpCode::JumpIfNotNullish:
                 $v = $stack[--$sp];
                 if ($v !== null && $v !== JsUndefined::Value) {
-                    $ip = $instr->operandA;
+                    $ip = $opA[$ci];
                 }
                 break;
 
             // ── Exception handling ──
             case OpCode::SetCatch:
                 $this->handlers[] = [
-                    'catchIP' => $instr->operandA,
+                    'catchIP' => $opA[$ci],
                     'frameCount' => $this->frameCount,
                     'sp' => $sp,
                     'env' => $env,
@@ -335,17 +387,19 @@ final class VirtualMachine
 
             // ── Functions (sync locals ↔ $this, delegate, re-read) ──
             case OpCode::MakeClosure:
-                $stack[$sp++] = new JsClosure($constants[$instr->operandA], $env);
+                $stack[$sp++] = new JsClosure($constants[$opA[$ci]], $env);
                 break;
 
             case OpCode::Call:
                 $this->sp = $sp;
                 $frame->ip = $ip;
                 $frame->env = $env;
-                $this->call($instr->operandA);
+                $this->call($opA[$ci]);
                 // Re-read — frame may have changed (JsClosure pushes new frame)
                 $frame = $this->frame;
-                $code = $frame->code;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
                 $constants = $frame->constants;
                 $names = $frame->names;
                 $env = $frame->env;
@@ -358,9 +412,11 @@ final class VirtualMachine
                 $this->sp = $sp;
                 $frame->ip = $ip;
                 $frame->env = $env;
-                $this->doNew($instr->operandA);
+                $this->doNew($opA[$ci]);
                 $frame = $this->frame;
-                $code = $frame->code;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
                 $constants = $frame->constants;
                 $names = $frame->names;
                 $env = $frame->env;
@@ -384,7 +440,9 @@ final class VirtualMachine
                     throw new VmException('TypeError: ' . gettype($callee) . ' is not a function');
                 }
                 $frame = $this->frame;
-                $code = $frame->code;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
                 $constants = $frame->constants;
                 $names = $frame->names;
                 $env = $frame->env;
@@ -401,7 +459,9 @@ final class VirtualMachine
                 $frame->env = $env;
                 $this->doNewWithArgs($callee, $argsArray->elements);
                 $frame = $this->frame;
-                $code = $frame->code;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
                 $constants = $frame->constants;
                 $names = $frame->names;
                 $env = $frame->env;
@@ -416,7 +476,9 @@ final class VirtualMachine
                 $frame->env = $env;
                 $this->doReturn();
                 $frame = $this->frame;
-                $code = $frame->code;
+                $ops = $frame->ops;
+                $opA = $frame->opA;
+                $opB = $frame->opB;
                 $constants = $frame->constants;
                 $names = $frame->names;
                 $env = $frame->env;
@@ -427,7 +489,7 @@ final class VirtualMachine
 
             // ── Arrays / Objects (inlined where simple, sync for property ops) ──
             case OpCode::MakeArray:
-                $count = $instr->operandA;
+                $count = $opA[$ci];
                 $elements = [];
                 for ($j = $count - 1; $j >= 0; $j--) {
                     $elements[$j] = $stack[--$sp];
@@ -437,7 +499,7 @@ final class VirtualMachine
                 break;
 
             case OpCode::MakeObject:
-                $count = $instr->operandA;
+                $count = $opA[$ci];
                 $pairs = [];
                 for ($j = 0; $j < $count; $j++) {
                     $value = $stack[--$sp];
@@ -495,7 +557,7 @@ final class VirtualMachine
                 goto halt;
 
             default:
-                throw new VmException("Unknown opcode: {$instr->op->name}");
+                throw new VmException("Unknown opcode: {$ops[$ci]->name}");
             }
             }
           } catch (\Throwable $e) {
@@ -517,7 +579,9 @@ final class VirtualMachine
 
             // Reload frame state (handler may have unwound frames)
             $frame = $this->frame;
-            $code = $frame->code;
+            $ops = $frame->ops;
+            $opA = $frame->opA;
+            $opB = $frame->opB;
             $constants = $frame->constants;
             $names = $frame->names;
             $env = $frame->env;
@@ -536,43 +600,43 @@ final class VirtualMachine
      * Execute a single instruction. Used by invokeFunction() for re-entrant
      * execution (e.g., array callback methods like map/filter).
      */
-    private function executeInstruction(\ScriptLite\Compiler\Instruction $instr): void
+    private function executeInstruction(OpCode $op, int $a, int $b): void
     {
-        match ($instr->op) {
+        match ($op) {
             // ── Constants & Stack ──
-            OpCode::Const => $this->push($this->frame->constants[$instr->operandA]),
+            OpCode::Const => $this->push($this->frame->constants[$a]),
             OpCode::Pop   => $this->pop(),
             OpCode::Dup   => $this->push($this->stack[$this->sp - 1]),
 
             // ── Arithmetic ──
             OpCode::Add    => $this->binaryAdd(),
-            OpCode::Sub    => $this->binaryOp(fn($a, $b) => $a - $b),
-            OpCode::Mul    => $this->binaryOp(fn($a, $b) => $a * $b),
-            OpCode::Div    => $this->binaryOp(fn($a, $b) => $b == 0 ? ($a == 0 ? NAN : ($a > 0 ? INF : -INF)) : $a / $b),
-            OpCode::Mod    => $this->binaryOp(fn($a, $b) => fmod($a, $b)),
+            OpCode::Sub    => $this->binaryOp(fn($x, $y) => $x - $y),
+            OpCode::Mul    => $this->binaryOp(fn($x, $y) => $x * $y),
+            OpCode::Div    => $this->binaryOp(fn($x, $y) => $y == 0 ? ($x == 0 ? NAN : ($x > 0 ? INF : -INF)) : $x / $y),
+            OpCode::Mod    => $this->binaryOp(fn($x, $y) => fmod($x, $y)),
             OpCode::Negate => $this->push(-$this->pop()),
             OpCode::Not    => $this->push(!$this->isTruthy($this->pop())),
             OpCode::Typeof => $this->push($this->jsTypeof($this->pop())),
-            OpCode::Exp    => $this->binaryOp(fn($a, $b) => $a ** $b),
+            OpCode::Exp    => $this->binaryOp(fn($x, $y) => $x ** $y),
 
             // ── Bitwise ──
-            OpCode::BitAnd => $this->binaryOp(fn($a, $b) => ((int) $a) & ((int) $b)),
-            OpCode::BitOr  => $this->binaryOp(fn($a, $b) => ((int) $a) | ((int) $b)),
-            OpCode::BitXor => $this->binaryOp(fn($a, $b) => ((int) $a) ^ ((int) $b)),
+            OpCode::BitAnd => $this->binaryOp(fn($x, $y) => ((int) $x) & ((int) $y)),
+            OpCode::BitOr  => $this->binaryOp(fn($x, $y) => ((int) $x) | ((int) $y)),
+            OpCode::BitXor => $this->binaryOp(fn($x, $y) => ((int) $x) ^ ((int) $y)),
             OpCode::BitNot => $this->push(~((int) $this->pop())),
-            OpCode::Shl    => $this->binaryOp(fn($a, $b) => ((int) $a) << (((int) $b) & 0x1F)),
-            OpCode::Shr    => $this->binaryOp(fn($a, $b) => ((int) $a) >> (((int) $b) & 0x1F)),
-            OpCode::Ushr   => $this->binaryOp(fn($a, $b) => (((int) $a) & 0xFFFFFFFF) >> (((int) $b) & 0x1F)),
+            OpCode::Shl    => $this->binaryOp(fn($x, $y) => ((int) $x) << (((int) $y) & 0x1F)),
+            OpCode::Shr    => $this->binaryOp(fn($x, $y) => ((int) $x) >> (((int) $y) & 0x1F)),
+            OpCode::Ushr   => $this->binaryOp(fn($x, $y) => (((int) $x) & 0xFFFFFFFF) >> (((int) $y) & 0x1F)),
 
             // ── Comparison ──
-            OpCode::Eq       => $this->binaryOp(fn($a, $b) => $a == $b),
-            OpCode::Neq      => $this->binaryOp(fn($a, $b) => $a != $b),
-            OpCode::StrictEq => $this->binaryOp(fn($a, $b) => $this->strictEqual($a, $b)),
-            OpCode::StrictNeq => $this->binaryOp(fn($a, $b) => !$this->strictEqual($a, $b)),
-            OpCode::Lt       => $this->binaryOp(fn($a, $b) => $a < $b),
-            OpCode::Lte      => $this->binaryOp(fn($a, $b) => $a <= $b),
-            OpCode::Gt       => $this->binaryOp(fn($a, $b) => $a > $b),
-            OpCode::Gte      => $this->binaryOp(fn($a, $b) => $a >= $b),
+            OpCode::Eq       => $this->binaryOp(fn($x, $y) => $x == $y),
+            OpCode::Neq      => $this->binaryOp(fn($x, $y) => $x != $y),
+            OpCode::StrictEq => $this->binaryOp(fn($x, $y) => $this->strictEqual($x, $y)),
+            OpCode::StrictNeq => $this->binaryOp(fn($x, $y) => !$this->strictEqual($x, $y)),
+            OpCode::Lt       => $this->binaryOp(fn($x, $y) => $x < $y),
+            OpCode::Lte      => $this->binaryOp(fn($x, $y) => $x <= $y),
+            OpCode::Gt       => $this->binaryOp(fn($x, $y) => $x > $y),
+            OpCode::Gte      => $this->binaryOp(fn($x, $y) => $x >= $y),
 
             // ── Property tests / delete ──
             OpCode::HasProp    => $this->hasProp(),
@@ -580,21 +644,21 @@ final class VirtualMachine
             OpCode::DeleteProp => $this->deleteProp(),
 
             // ── Variables ──
-            OpCode::GetLocal  => $this->push($this->frame->env->get($this->frame->names[$instr->operandA])),
-            OpCode::SetLocal  => $this->frame->env->set($this->frame->names[$instr->operandA], $this->pop()),
-            OpCode::DefineVar => $this->defineVar($instr->operandA, $instr->operandB),
-            OpCode::GetReg    => $this->push($this->frame->registers[$instr->operandA]),
-            OpCode::SetReg    => $this->frame->registers[$instr->operandA] = $this->pop(),
+            OpCode::GetLocal  => $this->push($this->frame->env->get($this->frame->names[$a])),
+            OpCode::SetLocal  => $this->frame->env->set($this->frame->names[$a], $this->pop()),
+            OpCode::DefineVar => $this->defineVar($a, $b),
+            OpCode::GetReg    => $this->push($this->frame->registers[$a]),
+            OpCode::SetReg    => $this->frame->registers[$a] = $this->pop(),
 
             // ── Control Flow ──
-            OpCode::Jump        => $this->frame->ip = $instr->operandA,
-            OpCode::JumpIfFalse => $this->jumpIfFalse($instr->operandA),
-            OpCode::JumpIfTrue  => $this->jumpIfTrue($instr->operandA),
-            OpCode::JumpIfNotNullish => $this->jumpIfNotNullish($instr->operandA),
+            OpCode::Jump        => $this->frame->ip = $a,
+            OpCode::JumpIfFalse => $this->jumpIfFalse($a),
+            OpCode::JumpIfTrue  => $this->jumpIfTrue($a),
+            OpCode::JumpIfNotNullish => $this->jumpIfNotNullish($a),
 
             // ── Exception handling ──
             OpCode::SetCatch => $this->handlers[] = [
-                'catchIP' => $instr->operandA,
+                'catchIP' => $a,
                 'frameCount' => $this->frameCount,
                 'sp' => $this->sp,
                 'env' => $this->frame->env,
@@ -603,9 +667,9 @@ final class VirtualMachine
             OpCode::Throw    => throw new JsThrowable($this->pop()),
 
             // ── Functions ──
-            OpCode::MakeClosure => $this->makeClosure($instr->operandA),
-            OpCode::Call        => $this->call($instr->operandA),
-            OpCode::New         => $this->doNew($instr->operandA),
+            OpCode::MakeClosure => $this->makeClosure($a),
+            OpCode::Call        => $this->call($a),
+            OpCode::New         => $this->doNew($a),
             OpCode::Return      => $this->doReturn(),
             OpCode::CallSpread  => $this->callSpread(),
             OpCode::NewSpread   => $this->newSpread(),
@@ -615,15 +679,15 @@ final class VirtualMachine
             OpCode::PopScope  => $this->frame->env = $this->frame->env->getParent(),
 
             // ── Arrays / Objects / Properties ──
-            OpCode::MakeArray   => $this->makeArray($instr->operandA),
-            OpCode::MakeObject  => $this->makeObject($instr->operandA),
+            OpCode::MakeArray   => $this->makeArray($a),
+            OpCode::MakeObject  => $this->makeObject($a),
             OpCode::GetProperty    => $this->getProperty(),
             OpCode::GetPropertyOpt => $this->getPropertyOpt(),
             OpCode::SetProperty    => $this->setProperty(),
             OpCode::ArrayPush   => $this->arrayPush(),
             OpCode::ArraySpread => $this->arraySpread(),
 
-            default => throw new VmException("Unknown opcode: {$instr->op->name}"),
+            default => throw new VmException("Unknown opcode: {$op->name}"),
         };
     }
 
@@ -656,7 +720,7 @@ final class VirtualMachine
             }
 
             $targetFrameCount = $this->frameCount;
-            $this->pushFrame($desc->code, $desc->constants, $desc->names, $callEnv);
+            $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv);
 
             // Set up register file and bind register-allocated parameters
             if ($desc->regCount > 0) {
@@ -675,13 +739,13 @@ final class VirtualMachine
             while ($this->frameCount > $targetFrameCount) {
                 try {
                     while ($this->frameCount > $targetFrameCount) {
-                        $instr = $this->frame->code[$this->frame->ip++];
+                        $ci = $this->frame->ip++;
 
-                        if ($instr->op === OpCode::Halt) {
+                        if ($this->frame->ops[$ci] === OpCode::Halt) {
                             break 2;
                         }
 
-                        $this->executeInstruction($instr);
+                        $this->executeInstruction($this->frame->ops[$ci], $this->frame->opA[$ci], $this->frame->opB[$ci]);
                     }
                 } catch (\Throwable $e) {
                     $thrown = $e instanceof JsThrowable ? $e->value : $e->getMessage();
@@ -830,7 +894,7 @@ final class VirtualMachine
             $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
         }
 
-        $this->pushFrame($desc->code, $desc->constants, $desc->names, $callEnv);
+        $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv);
 
         // Set up register file and bind register-allocated parameters
         if ($desc->regCount > 0) {
@@ -880,7 +944,7 @@ final class VirtualMachine
             if ($desc->restParam !== null && $desc->restParamSlot < 0) {
                 $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
             }
-            $this->pushFrame($desc->code, $desc->constants, $desc->names, $callEnv, $newObj);
+            $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv, $newObj);
 
             // Set up register file and bind register-allocated parameters
             if ($desc->regCount > 0) {
@@ -925,7 +989,9 @@ final class VirtualMachine
         if ($this->frameCount === 0) {
             // Push a Halt instruction virtually
             $this->frame = new CallFrame(
-                [new \ScriptLite\Compiler\Instruction(OpCode::Halt)],
+                [OpCode::Halt],
+                [0],
+                [0],
                 [],
                 [],
                 new Environment(),
@@ -980,7 +1046,7 @@ final class VirtualMachine
             if ($desc->restParam !== null && $desc->restParamSlot < 0) {
                 $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
             }
-            $this->pushFrame($desc->code, $desc->constants, $desc->names, $callEnv, $newObj);
+            $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv, $newObj);
             if ($desc->regCount > 0) {
                 $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
                 for ($i = 0; $i < $paramCount; $i++) {
@@ -1057,10 +1123,16 @@ final class VirtualMachine
 
     // ──────────────────── Frame Management ────────────────────
 
-    private function pushFrame(array $code, array $constants, array $names, Environment $env, ?JsObject $constructTarget = null): void
+    private function pushFrame(array $ops, array $opA, array $opB, array $constants, array $names, Environment $env, ?JsObject $constructTarget = null): void
     {
-        $frame = new CallFrame($code, $constants, $names, $env, $this->sp, $constructTarget);
-        $this->frames[$this->frameCount++] = $frame;
+        if (isset($this->frames[$this->frameCount])) {
+            $frame = $this->frames[$this->frameCount];
+            $frame->reset($ops, $opA, $opB, $constants, $names, $env, $this->sp, $constructTarget);
+        } else {
+            $frame = new CallFrame($ops, $opA, $opB, $constants, $names, $env, $this->sp, $constructTarget);
+            $this->frames[$this->frameCount] = $frame;
+        }
+        $this->frameCount++;
         $this->frame = $frame;
     }
 
@@ -1129,6 +1201,10 @@ final class VirtualMachine
     {
         $key = $this->pop();
         $obj = $this->pop();
+        if ($obj === null || $obj === JsUndefined::Value) {
+            $type = $obj === null ? 'null' : 'undefined';
+            throw new VmException("TypeError: Cannot read properties of {$type} (reading '{$key}')");
+        }
         $this->resolveProperty($obj, $key);
     }
 
@@ -1496,6 +1572,27 @@ final class VirtualMachine
         return '[object Object]';
     }
 
+    /**
+     * JS Abstract Equality (==) — handles null/undefined and type coercion.
+     */
+    private function jsLooseEqual(mixed $a, mixed $b): bool
+    {
+        // null == undefined → true (and vice versa)
+        $aIsNullish = ($a === null || $a === JsUndefined::Value);
+        $bIsNullish = ($b === null || $b === JsUndefined::Value);
+        if ($aIsNullish && $bIsNullish) {
+            return true;
+        }
+        if ($aIsNullish || $bIsNullish) {
+            return false; // null/undefined != anything else in JS
+        }
+        // Boolean → number coercion before comparison
+        if (is_bool($a)) { $a = $a ? 1 : 0; }
+        if (is_bool($b)) { $b = $b ? 1 : 0; }
+        // Delegate to PHP == for remaining cases (string/number coercion works)
+        return $a == $b;
+    }
+
     private function strictEqual(mixed $a, mixed $b): bool
     {
         // JS strict equality: type must match exactly
@@ -1719,6 +1816,22 @@ final class VirtualMachine
             }),
         ]));
 
+        // ── JSON ──
+        $env->define('JSON', new JsObject([
+            'stringify' => new NativeFunction('JSON.stringify', function (mixed $value, mixed $replacer = null, mixed $space = null) use ($vm) {
+                $php = self::toJsonSafe($value);
+                $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+                if ($space !== null && $space !== JsUndefined::Value) {
+                    $flags |= JSON_PRETTY_PRINT;
+                }
+                return json_encode($php, $flags);
+            }),
+            'parse' => new NativeFunction('JSON.parse', function (string $json) {
+                $result = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+                return self::fromPhp($result);
+            }),
+        ]));
+
         // ── RegExp ──
         $env->define('RegExp', new NativeFunction('RegExp', function (mixed $pattern, mixed $flags = '') {
             return new JsRegex((string) $pattern, (string) ($flags === JsUndefined::Value ? '' : $flags));
@@ -1767,6 +1880,27 @@ final class VirtualMachine
         }
         if (is_object($value)) {
             return new PhpObjectProxy($value);
+        }
+        return $value;
+    }
+
+    /**
+     * Convert a JS value to a json_encode-safe PHP value (objects → stdClass).
+     */
+    private static function toJsonSafe(mixed $value): mixed
+    {
+        if ($value === JsUndefined::Value) {
+            return null;
+        }
+        if ($value instanceof JsArray) {
+            return array_map(self::toJsonSafe(...), $value->elements);
+        }
+        if ($value instanceof JsObject) {
+            $obj = new \stdClass();
+            foreach ($value->properties as $k => $v) {
+                $obj->$k = self::toJsonSafe($v);
+            }
+            return $obj;
         }
         return $value;
     }

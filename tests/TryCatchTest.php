@@ -4,17 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Tests;
 
-use ScriptLite\Engine;
-use PHPUnit\Framework\TestCase;
-
-final class TryCatchTest extends TestCase
+class TryCatchTest extends ScriptLiteTestCase
 {
-    private Engine $engine;
-
-    protected function setUp(): void
-    {
-        $this->engine = new Engine();
-    }
 
     // ═══════════════════ Basic throw/catch ═══════════════════
 
@@ -29,7 +20,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('boom', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'boom');
     }
 
     public function testThrowNumberCatch(): void
@@ -43,7 +34,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame(42, $this->engine->eval($code));
+        $this->assertBothBackends($code, 42);
     }
 
     public function testThrowBooleanCatch(): void
@@ -57,7 +48,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame(true, $this->engine->eval($code));
+        $this->assertBothBackends($code, true);
     }
 
     // ═══════════════════ Catch parameter binding ═══════════════════
@@ -73,7 +64,7 @@ final class TryCatchTest extends TestCase
             }
             msg
         ';
-        self::assertSame('error message', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'error message');
     }
 
     // ═══════════════════ Code after try/catch runs ═══════════════════
@@ -90,7 +81,7 @@ final class TryCatchTest extends TestCase
             result = result + " after";
             result
         ';
-        self::assertSame('caught after', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'caught after');
     }
 
     // ═══════════════════ No throw → catch skipped ═══════════════════
@@ -106,7 +97,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('try body', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'try body');
     }
 
     // ═══════════════════ Cross-frame unwinding ═══════════════════
@@ -125,7 +116,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('from function', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'from function');
     }
 
     public function testThrowInsideNestedFunctionCalls(): void
@@ -141,7 +132,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('deep', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'deep');
     }
 
     // ═══════════════════ Nested try/catch ═══════════════════
@@ -161,7 +152,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('inner: inner error', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'inner: inner error');
     }
 
     public function testNestedTryCatchOuterHandles(): void
@@ -179,7 +170,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('rethrown: inner error', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'rethrown: inner error');
     }
 
     // ═══════════════════ Throw in catch (re-throw) ═══════════════════
@@ -199,7 +190,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('original', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'original');
     }
 
     // ═══════════════════ Throw expression types ═══════════════════
@@ -216,7 +207,7 @@ final class TryCatchTest extends TestCase
             }
             result
         ';
-        self::assertSame('computed error', $this->engine->eval($code));
+        $this->assertBothBackends($code, 'computed error');
     }
 
     // ═══════════════════ Stack state after catch ═══════════════════
@@ -234,7 +225,7 @@ final class TryCatchTest extends TestCase
             }
             a + b
         ';
-        self::assertSame(3, $this->engine->eval($code));
+        $this->assertBothBackends($code, 3);
     }
 
     // ═══════════════════ Uncaught throw → runtime error ═══════════════════
@@ -243,68 +234,5 @@ final class TryCatchTest extends TestCase
     {
         $this->expectException(\RuntimeException::class);
         $this->engine->eval('throw "uncaught"');
-    }
-
-    // ═══════════════════ Transpiler path ═══════════════════
-
-    public function testTranspilerBasicThrowCatch(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "";
-            try {
-                throw "boom";
-            } catch (e) {
-                result = e;
-            }
-            result
-        ');
-        self::assertSame('boom', $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerNoThrow(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "ok";
-            try {
-                result = result + " tried";
-            } catch (e) {
-                result = "caught";
-            }
-            result
-        ');
-        self::assertSame('ok tried', $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerThrowInsideFunction(): void
-    {
-        $php = $this->engine->transpile('
-            function fail() { throw "fn error"; }
-            var result = "";
-            try {
-                fail();
-            } catch (e) {
-                result = e;
-            }
-            result
-        ');
-        self::assertSame('fn error', $this->engine->evalTranspiled($php));
-    }
-
-    public function testTranspilerNestedRethrow(): void
-    {
-        $php = $this->engine->transpile('
-            var result = "";
-            try {
-                try {
-                    throw "inner";
-                } catch (e) {
-                    throw "re: " + e;
-                }
-            } catch (e) {
-                result = e;
-            }
-            result
-        ');
-        self::assertSame('re: inner', $this->engine->evalTranspiled($php));
     }
 }

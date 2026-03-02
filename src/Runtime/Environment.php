@@ -61,6 +61,17 @@ final class Environment
     }
 
     /**
+     * Look up a variable, returning a sentinel if not found (for typeof).
+     */
+    public function has(string $name): bool
+    {
+        if (array_key_exists($name, $this->values)) {
+            return true;
+        }
+        return $this->parent?->has($name) ?? false;
+    }
+
+    /**
      * Set an existing variable (walks scope chain).
      */
     public function set(string $name, mixed $value): void

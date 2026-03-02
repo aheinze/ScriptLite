@@ -6,7 +6,8 @@ namespace ScriptLite\Compiler;
 
 use ScriptLite\Ast\{
     ArrayLiteral, AssignExpr, BinaryExpr, BlockStmt, BooleanLiteral, BreakStmt, CallExpr,
-    ConditionalExpr, ContinueStmt, DeleteExpr, DoWhileStmt, ExpressionStmt, Expr, ForStmt,
+    ConditionalExpr, ContinueStmt, DestructuringDeclaration, DeleteExpr, DoWhileStmt,
+    ExpressionStmt, Expr, ForInStmt, ForOfStmt, ForStmt,
     FunctionDeclaration, FunctionExpr,
     Identifier, IfStmt, LogicalExpr, MemberAssignExpr, MemberExpr, NewExpr, NullLiteral, NumberLiteral,
     ObjectLiteral, Program, RegexLiteral, ReturnStmt, SpreadElement, Stmt, StringLiteral, SwitchStmt,
@@ -34,8 +35,12 @@ use RuntimeException;
  */
 final class Compiler
 {
-    /** @var Instruction[] */
-    private array $code = [];
+    /** @var OpCode[] Flat opcode array */
+    private array $ops = [];
+    /** @var int[] Flat operandA array */
+    private array $opA = [];
+    /** @var int[] Flat operandB array */
+    private array $opB = [];
 
     /** @var array<int|float|string|bool|null|FunctionDescriptor> */
     private array $constants = [];
@@ -56,6 +61,9 @@ final class Compiler
 
     /** @var int Number of register slots allocated */
     private int $regCount = 0;
+
+    /** @var int Counter for unique temp variable names */
+    private int $tempCounter = 0;
 
     // ── Loop/switch context for break/continue ──
 
@@ -99,7 +107,9 @@ final class Compiler
             new FunctionDescriptor(
                 name: '<main>',
                 params: [],
-                code: $this->code,
+                ops: $this->ops,
+                opA: $this->opA,
+                opB: $this->opB,
                 constants: $this->constants,
                 names: $this->names,
                 regCount: $this->regCount,
@@ -121,6 +131,9 @@ final class Compiler
             $stmt instanceof IfStmt => $this->compileIf($stmt),
             $stmt instanceof WhileStmt => $this->compileWhile($stmt),
             $stmt instanceof ForStmt => $this->compileFor($stmt),
+            $stmt instanceof ForOfStmt => $this->compileForOf($stmt),
+            $stmt instanceof ForInStmt => $this->compileForIn($stmt),
+            $stmt instanceof DestructuringDeclaration => $this->compileDestructuring($stmt),
             $stmt instanceof BreakStmt => $this->compileBreak(),
             $stmt instanceof ContinueStmt => $this->compileContinue(),
             $stmt instanceof DoWhileStmt => $this->compileDoWhile($stmt),
@@ -235,7 +248,7 @@ final class Compiler
 
     private function compileWhile(WhileStmt $stmt): void
     {
-        $loopStart = count($this->code);
+        $loopStart = count($this->ops);
         $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
 
         $this->compileExpr($stmt->condition);
@@ -269,7 +282,7 @@ final class Compiler
             $this->emit(OpCode::Pop);
         }
 
-        $loopStart = count($this->code);
+        $loopStart = count($this->ops);
         $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
 
         // Condition
@@ -283,7 +296,7 @@ final class Compiler
         $this->compileStmt($stmt->body);
 
         // continue → jump to update (not condition)
-        $updateStart = count($this->code);
+        $updateStart = count($this->ops);
         $this->patchContinues($updateStart);
 
         // Update
@@ -305,15 +318,225 @@ final class Compiler
         }
     }
 
+    /**
+     * for (var/let/const x of iterable) { body }
+     *
+     * Desugars to: var __arr = iterable; var __i = 0; while (__i < __arr.length) { x = __arr[__i]; body; __i++; }
+     * But implemented directly in bytecode using index iteration over JsArray elements.
+     */
+    private function compileForOf(ForOfStmt $stmt): void
+    {
+        $needsScope = $stmt->kind !== VarKind::Var;
+        if ($needsScope) {
+            $this->emit(OpCode::PushScope);
+        }
+
+        // Push iterable onto stack, store in temp var
+        $uid = $this->tempCounter++;
+        $this->compileExpr($stmt->iterable);
+        $arrName = $this->addName("__forof_arr{$uid}");
+        $this->emit(OpCode::DefineVar, $arrName, 0);
+
+        // Init index = 0
+        $this->emit(OpCode::Const, $this->addConstant(0.0));
+        $idxName = $this->addName("__forof_idx{$uid}");
+        $this->emit(OpCode::DefineVar, $idxName, 0);
+
+        // Loop start
+        $loopStart = count($this->ops);
+        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+
+        // Condition: __forof_idx < __forof_arr.length
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::GetLocal, $arrName);
+        $this->emit(OpCode::Const, $this->addConstant('length'));
+        $this->emit(OpCode::GetProperty);
+        $this->emit(OpCode::Lt);
+        $exitJump = $this->emitJump(OpCode::JumpIfFalse);
+
+        // x = __forof_arr[__forof_idx]
+        $this->emit(OpCode::GetLocal, $arrName);
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::GetProperty);
+        if (isset($this->regMap[$stmt->name])) {
+            $this->emit(OpCode::SetReg, $this->regMap[$stmt->name]);
+        } else {
+            $varName = $this->addName($stmt->name);
+            $kindVal = match ($stmt->kind) {
+                VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
+            };
+            $this->emit(OpCode::DefineVar, $varName, $kindVal);
+        }
+
+        // Body
+        $this->compileStmt($stmt->body);
+
+        // Continue point
+        $updateStart = count($this->ops);
+        $this->patchContinues($updateStart);
+
+        // __forof_idx++
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::Const, $this->addConstant(1.0));
+        $this->emit(OpCode::Add);
+        $this->emit(OpCode::SetLocal, $idxName);
+
+        $this->emit(OpCode::Jump, $loopStart);
+        $this->patchJump($exitJump);
+        $this->patchBreaks();
+
+        if ($needsScope) {
+            $this->emit(OpCode::PopScope);
+        }
+    }
+
+    /**
+     * for (var/let/const x in object) { body }
+     *
+     * Gets Object.keys() and iterates over them.
+     */
+    private function compileForIn(ForInStmt $stmt): void
+    {
+        $needsScope = $stmt->kind !== VarKind::Var;
+        if ($needsScope) {
+            $this->emit(OpCode::PushScope);
+        }
+
+        // Push Object.keys(object) to get array of keys
+        $uid = $this->tempCounter++;
+        $this->emit(OpCode::GetLocal, $this->addName('Object'));
+        $this->emit(OpCode::Const, $this->addConstant('keys'));
+        $this->emit(OpCode::GetProperty);
+        $this->compileExpr($stmt->object);
+        $this->emit(OpCode::Call, 1);
+        $arrName = $this->addName("__forin_arr{$uid}");
+        $this->emit(OpCode::DefineVar, $arrName, 0);
+
+        // Init index = 0
+        $this->emit(OpCode::Const, $this->addConstant(0.0));
+        $idxName = $this->addName("__forin_idx{$uid}");
+        $this->emit(OpCode::DefineVar, $idxName, 0);
+
+        // Loop start
+        $loopStart = count($this->ops);
+        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+
+        // Condition: __forin_idx < __forin_arr.length
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::GetLocal, $arrName);
+        $this->emit(OpCode::Const, $this->addConstant('length'));
+        $this->emit(OpCode::GetProperty);
+        $this->emit(OpCode::Lt);
+        $exitJump = $this->emitJump(OpCode::JumpIfFalse);
+
+        // x = __forin_arr[__forin_idx]
+        $this->emit(OpCode::GetLocal, $arrName);
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::GetProperty);
+        if (isset($this->regMap[$stmt->name])) {
+            $this->emit(OpCode::SetReg, $this->regMap[$stmt->name]);
+        } else {
+            $varName = $this->addName($stmt->name);
+            $kindVal = match ($stmt->kind) {
+                VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
+            };
+            $this->emit(OpCode::DefineVar, $varName, $kindVal);
+        }
+
+        // Body
+        $this->compileStmt($stmt->body);
+
+        // Continue point
+        $updateStart = count($this->ops);
+        $this->patchContinues($updateStart);
+
+        // __forin_idx++
+        $this->emit(OpCode::GetLocal, $idxName);
+        $this->emit(OpCode::Const, $this->addConstant(1.0));
+        $this->emit(OpCode::Add);
+        $this->emit(OpCode::SetLocal, $idxName);
+
+        $this->emit(OpCode::Jump, $loopStart);
+        $this->patchJump($exitJump);
+        $this->patchBreaks();
+
+        if ($needsScope) {
+            $this->emit(OpCode::PopScope);
+        }
+    }
+
+    private function compileDestructuring(DestructuringDeclaration $decl): void
+    {
+        // Evaluate initializer once, store in temp
+        $uid = $this->tempCounter++;
+        $this->compileExpr($decl->initializer);
+        $tmpName = $this->addName("__destr_tmp{$uid}");
+        $this->emit(OpCode::DefineVar, $tmpName, 0);
+
+        // Extract each binding
+        foreach ($decl->bindings as $binding) {
+            $this->emit(OpCode::GetLocal, $tmpName);
+            if ($decl->isArray) {
+                // Array: access by index
+                $this->emit(OpCode::Const, $this->addConstant((float) $binding['source']));
+            } else {
+                // Object: access by key
+                $this->emit(OpCode::Const, $this->addConstant($binding['source']));
+            }
+            $this->emit(OpCode::GetProperty);
+
+            // Default value handling
+            if ($binding['default'] !== null) {
+                $this->emit(OpCode::Dup);
+                $this->emit(OpCode::Const, $this->addConstant(JsUndefined::Value));
+                $this->emit(OpCode::StrictEq);
+                $skipDefault = $this->emitJump(OpCode::JumpIfFalse);
+                $this->emit(OpCode::Pop); // discard undefined
+                $this->compileExpr($binding['default']);
+                $this->patchJump($skipDefault);
+            }
+
+            // Store in variable
+            if (isset($this->regMap[$binding['name']])) {
+                $this->emit(OpCode::SetReg, $this->regMap[$binding['name']]);
+            } else {
+                $nameIdx = $this->addName($binding['name']);
+                $kindVal = match ($decl->kind) {
+                    VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
+                };
+                $this->emit(OpCode::DefineVar, $nameIdx, $kindVal);
+            }
+        }
+
+        // Handle rest element
+        if ($decl->restName !== null && $decl->isArray) {
+            // rest = arr.slice(bindingCount)
+            $this->emit(OpCode::GetLocal, $tmpName);
+            $this->emit(OpCode::Const, $this->addConstant('slice'));
+            $this->emit(OpCode::GetProperty);
+            $this->emit(OpCode::Const, $this->addConstant((float) count($decl->bindings)));
+            $this->emit(OpCode::Call, 1);
+            if (isset($this->regMap[$decl->restName])) {
+                $this->emit(OpCode::SetReg, $this->regMap[$decl->restName]);
+            } else {
+                $nameIdx = $this->addName($decl->restName);
+                $kindVal = match ($decl->kind) {
+                    VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
+                };
+                $this->emit(OpCode::DefineVar, $nameIdx, $kindVal);
+            }
+        }
+    }
+
     private function compileDoWhile(DoWhileStmt $stmt): void
     {
-        $bodyStart = count($this->code);
+        $bodyStart = count($this->ops);
         $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
 
         $this->compileStmt($stmt->body);
 
         // continue → jump to condition
-        $condStart = count($this->code);
+        $condStart = count($this->ops);
         $this->patchContinues($condStart);
 
         $this->compileExpr($stmt->condition);
@@ -394,7 +617,7 @@ final class Compiler
     {
         $loop = &$this->loopStack[count($this->loopStack) - 1];
         foreach ($loop['continuePatches'] as $idx) {
-            $this->code[$idx]->operandA = $target;
+            $this->opA[$idx] = $target;
         }
     }
 
@@ -402,9 +625,9 @@ final class Compiler
     private function patchBreaks(): void
     {
         $loop = array_pop($this->loopStack);
-        $target = count($this->code);
+        $target = count($this->ops);
         foreach ($loop['breakPatches'] as $idx) {
-            $this->code[$idx]->operandA = $target;
+            $this->opA[$idx] = $target;
         }
     }
 
@@ -429,7 +652,7 @@ final class Compiler
         $skipCatch = $this->emitJump(OpCode::Jump);
 
         // Catch handler starts here — patch SetCatch to point here
-        $this->code[$setCatchIdx]->operandA = count($this->code);
+        $this->opA[$setCatchIdx] = count($this->ops);
 
         if ($stmt->handler !== null) {
             // Catch param is block-scoped
@@ -499,6 +722,16 @@ final class Compiler
 
     private function compileTypeof(TypeofExpr $expr): void
     {
+        // typeof <identifier> must not throw on undeclared variables (ES spec)
+        if ($expr->operand instanceof Identifier) {
+            if (isset($this->regMap[$expr->operand->name])) {
+                $this->emit(OpCode::GetReg, $this->regMap[$expr->operand->name]);
+                $this->emit(OpCode::Typeof);
+            } else {
+                $this->emit(OpCode::TypeofVar, $this->addName($expr->operand->name));
+            }
+            return;
+        }
         $this->compileExpr($expr->operand);
         $this->emit(OpCode::Typeof);
     }
@@ -535,7 +768,11 @@ final class Compiler
     private function compileObjectLiteral(ObjectLiteral $expr): void
     {
         foreach ($expr->properties as $prop) {
-            $this->emit(OpCode::Const, $this->addConstant($prop->key));
+            if ($prop->computed && $prop->computedKey !== null) {
+                $this->compileExpr($prop->computedKey);
+            } else {
+                $this->emit(OpCode::Const, $this->addConstant($prop->key));
+            }
             $this->compileExpr($prop->value);
         }
         $this->emit(OpCode::MakeObject, count($expr->properties));
@@ -999,7 +1236,9 @@ final class Compiler
         return new FunctionDescriptor(
             name: $name,
             params: $params,
-            code: $child->code,
+            ops: $child->ops,
+            opA: $child->opA,
+            opB: $child->opB,
             constants: $child->constants,
             names: $child->names,
             regCount: $child->regCount,
@@ -1088,6 +1327,34 @@ final class Compiler
                     $locals[$stmt->init->name] = true;
                 }
                 self::collectDeclarations([$stmt->body], $locals);
+            } elseif ($stmt instanceof ForOfStmt) {
+                if ($stmt->kind === VarKind::Var) {
+                    $locals[$stmt->name] = true;
+                }
+                self::collectDeclarations([$stmt->body], $locals);
+            } elseif ($stmt instanceof ForInStmt) {
+                if ($stmt->kind === VarKind::Var) {
+                    $locals[$stmt->name] = true;
+                }
+                self::collectDeclarations([$stmt->body], $locals);
+            } elseif ($stmt instanceof DestructuringDeclaration && $stmt->kind === VarKind::Var) {
+                foreach ($stmt->bindings as $b) {
+                    $locals[$b['name']] = true;
+                }
+                if ($stmt->restName !== null) {
+                    $locals[$stmt->restName] = true;
+                }
+            } elseif ($stmt instanceof DoWhileStmt) {
+                self::collectDeclarations([$stmt->body], $locals);
+            } elseif ($stmt instanceof SwitchStmt) {
+                foreach ($stmt->cases as $case) {
+                    self::collectDeclarations($case->consequent, $locals);
+                }
+            } elseif ($stmt instanceof TryCatchStmt) {
+                self::collectDeclarations([$stmt->block], $locals);
+                if ($stmt->handler !== null) {
+                    self::collectDeclarations([$stmt->handler->body], $locals);
+                }
             }
         }
     }
@@ -1154,6 +1421,14 @@ final class Compiler
                 self::walkForInnerFnRefs($node->update, $refs);
             }
             self::walkForInnerFnRefs($node->body, $refs);
+        } elseif ($node instanceof ForOfStmt) {
+            self::walkForInnerFnRefs($node->iterable, $refs);
+            self::walkForInnerFnRefs($node->body, $refs);
+        } elseif ($node instanceof ForInStmt) {
+            self::walkForInnerFnRefs($node->object, $refs);
+            self::walkForInnerFnRefs($node->body, $refs);
+        } elseif ($node instanceof DestructuringDeclaration) {
+            self::walkForInnerFnRefs($node->initializer, $refs);
         } elseif ($node instanceof BinaryExpr) {
             self::walkForInnerFnRefs($node->left, $refs);
             self::walkForInnerFnRefs($node->right, $refs);
@@ -1342,8 +1617,10 @@ final class Compiler
 
     private function emit(OpCode $op, int $a = 0, int $b = 0): int
     {
-        $idx = count($this->code);
-        $this->code[] = new Instruction($op, $a, $b);
+        $idx = count($this->ops);
+        $this->ops[] = $op;
+        $this->opA[] = $a;
+        $this->opB[] = $b;
         return $idx;
     }
 
@@ -1354,7 +1631,7 @@ final class Compiler
 
     private function patchJump(int $instrIdx): void
     {
-        $this->code[$instrIdx]->operandA = count($this->code);
+        $this->opA[$instrIdx] = count($this->ops);
     }
 
     private function addConstant(mixed $value): int
