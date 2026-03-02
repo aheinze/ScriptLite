@@ -81,20 +81,20 @@ final class Engine
      * closures capture them correctly. Only the keys matter at transpile time;
      * actual values are provided at execution time.
      *
-     * @param array<string, mixed> $globals Keys = variable names to register
+     * @param list<string>|array<string, mixed> $globals Variable names (list) or name => value pairs (associative)
      */
     public function transpile(string $source, array $globals = []): string
     {
         $parser  = new Parser($source);
         $program = $parser->parse();
         $transpiler = new PhpTranspiler();
-        return $transpiler->transpile($program, array_keys($globals));
+        return $transpiler->transpile($program, self::extractGlobalNames($globals));
     }
 
     /**
      * Transpile JS source and return a closure for repeated execution.
      *
-     * @param array<string, mixed> $globals Keys = variable names to register for transpilation
+     * @param list<string>|array<string, mixed> $globals Variable names (list) or name => value pairs (associative)
      */
     public function getTranspiledCallback(string $source, array $globals = []): \Closure
     {
@@ -261,5 +261,20 @@ final class Engine
         }
 
         return $value;
+    }
+
+    /**
+     * Accept either a list of names (['acc', 'multiplier']) or an associative
+     * array (['acc' => $val, ...]) and return just the names.
+     *
+     * @param list<string>|array<string, mixed> $globals
+     * @return list<string>
+     */
+    private static function extractGlobalNames(array $globals): array
+    {
+        if ($globals === [] || array_is_list($globals)) {
+            return $globals;
+        }
+        return array_keys($globals);
     }
 }

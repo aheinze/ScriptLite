@@ -4,7 +4,7 @@ An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subs
 
 Two execution backends:
 - **Bytecode VM** — a stack-based virtual machine with 55 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~22x faster than the VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the VM)
 
 ## Quick start
 
@@ -152,27 +152,25 @@ Objects returned from methods are also wrapped, so chained access works. PHP clo
 
 ### Transpiler path
 
-The same globals work with the transpiler. Pass the globals at both transpile time (so the scope tracker knows the variable names) and at execution time (to provide the values):
+The same globals work with the transpiler. The transpile step only needs variable **names** (so the scope tracker captures them correctly); actual values are provided at execution time:
 
 ```php
-$globals = ['acc' => $acc, 'multiplier' => 2];
-
 // One-shot: transpile and execute in a single call
-$result = $engine->transpileAndEval($script, $globals);
+$result = $engine->transpileAndEval($script, ['acc' => $acc, 'multiplier' => 2]);
 
-// Transpile once, run many times with different globals
-$callback = $engine->getTranspiledCallback($script, $globals);
+// Transpile once, run many times with different values
+$callback = $engine->getTranspiledCallback($script, ['acc', 'multiplier']);
 $result = $callback(['acc' => $acc1, 'multiplier' => 2]);
 $result = $callback(['acc' => $acc2, 'multiplier' => 3]);
 
 // Or step by step for full control:
-$php = $engine->transpile($script, $globals);
-$result = $engine->runTranspiled($php, $globals);    // temp file (worker-safe)
-$result = $engine->evalTranspiled($php, $globals);   // eval (leaks in long-running workers)
+$php = $engine->transpile($script, ['acc', 'multiplier']);
+$result = $engine->runTranspiled($php, ['acc' => $acc]);    // temp file (worker-safe)
+$result = $engine->evalTranspiled($php, ['acc' => $acc]);   // eval (leaks in long-running workers)
 
 // Or save to a file for OPcache:
 $engine->saveTranspiled($php, '/tmp/script.php');
-$__globals = $globals;
+$__globals = ['acc' => $acc, 'multiplier' => 2];
 $result = include '/tmp/script.php';
 ```
 
@@ -232,9 +230,9 @@ Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort,
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~80 ms | ~102x |
-| Transpiled PHP (eval'd) | ~3.5 ms | ~4.7x |
-| Native PHP (hand-written) | ~0.78 ms | 1x |
+| VM (bytecode interpreter) | ~80 ms | ~108x |
+| Transpiled PHP (eval'd) | ~2.6 ms | ~3.5x |
+| Native PHP (hand-written) | ~0.75 ms | 1x |
 
 
 ## License

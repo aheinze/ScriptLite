@@ -112,8 +112,23 @@ final class PhpTranspiler
      */
     private function emitCondition(Expr $e): string
     {
-        if ($this->inferType($e) === TypeHint::Bool) {
+        $type = $this->inferType($e);
+        if ($type === TypeHint::Bool) {
             return $this->emitExpr($e);
+        }
+        if ($type === TypeHint::Numeric) {
+            $emitted = $this->emitExpr($e);
+            // Numeric: 0, 0.0, NaN are falsy. Inline avoids function call.
+            [$a, $r] = $this->inlineGuardVar($emitted, 'c');
+            return "({$a} !== 0 && {$r} !== 0.0 && (!is_float({$r}) || !is_nan({$r})))";
+        }
+        if ($type === TypeHint::String) {
+            return '(' . $this->emitExpr($e) . " !== '')";
+        }
+        if ($type === TypeHint::Array_ || $type === TypeHint::Object_) {
+            // Arrays and objects are always truthy in JS
+            // Still evaluate the expression for side effects, then return true
+            return '((' . $this->emitExpr($e) . ') || true)';
         }
         return self::OPS . '::toBoolean(' . $this->emitExpr($e) . ')';
     }
@@ -468,16 +483,35 @@ final class PhpTranspiler
 
             // Fast path: either provably string → string concat
             if ($leftType === TypeHint::String || $rightType === TypeHint::String) {
+                // '' + expr → just toString(expr), skip redundant '' . concatenation
+                if ($e->left instanceof StringLiteral && $e->left->value === '' && $rightType !== TypeHint::String) {
+                    return self::OPS . '::toString(' . $r . ')';
+                }
+                if ($e->right instanceof StringLiteral && $e->right->value === '' && $leftType !== TypeHint::String) {
+                    return self::OPS . '::toString(' . $l . ')';
+                }
                 $ls = $leftType === TypeHint::String ? $l : self::OPS . '::toString(' . $l . ')';
                 $rs = $rightType === TypeHint::String ? $r : self::OPS . '::toString(' . $r . ')';
                 return '(' . $ls . ' . ' . $rs . ')';
             }
 
-            // Unknown types: inline numeric fast path, fallback to Ops::add
-            // Use & (not &&) so both assignments always execute — prevents undefined $tb on short-circuit
-            $ta = '$__a' . $this->tmpId++;
-            $tb = '$__b' . $this->tmpId++;
-            return "((is_int({$ta} = {$l}) || is_float({$ta})) & (is_int({$tb} = {$r}) || is_float({$tb})) ? {$ta} + {$tb} : " . self::OPS . "::add({$ta}, {$tb}))";
+            // Inline numeric fast path: when one side is already known-numeric, only guard the other
+            $leftNum = $leftType === TypeHint::Numeric;
+            $rightNum = $rightType === TypeHint::Numeric;
+            if ($leftNum) {
+                // Left is numeric: only need to check right
+                [$ra, $rr] = $this->inlineGuardVar($r, 'b');
+                return "((is_int({$ra}) || is_float({$rr})) ? {$l} + {$rr} : " . self::OPS . "::add({$l}, {$rr}))";
+            }
+            if ($rightNum) {
+                // Right is numeric: only need to check left
+                [$la, $lr] = $this->inlineGuardVar($l, 'a');
+                return "((is_int({$la}) || is_float({$lr})) ? {$lr} + {$r} : " . self::OPS . "::add({$lr}, {$r}))";
+            }
+            // Both unknown: use & (not &&) so both sides always execute
+            [$la, $lr] = $this->inlineGuardVar($l, 'a');
+            [$ra, $rr] = $this->inlineGuardVar($r, 'b');
+            return "((is_int({$la}) || is_float({$lr})) & (is_int({$ra}) || is_float({$rr})) ? {$lr} + {$rr} : " . self::OPS . "::add({$lr}, {$rr}))";
         }
 
         if ($e->operator === '>>>') {
@@ -561,12 +595,12 @@ final class PhpTranspiler
             $leftType = $this->inferType($e->left);
             $rightType = $this->inferType($e->right);
             if ($leftType !== TypeHint::Numeric) {
-                $tv = '$__n' . $this->tmpId++;
-                $l = "(is_int({$tv} = {$l}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv}))";
+                [$na, $nr] = $this->inlineGuardVar($l, 'n');
+                $l = "(is_int({$na}) || is_float({$nr}) ? {$nr} : " . self::OPS . "::toNumber({$nr}))";
             }
             if ($rightType !== TypeHint::Numeric) {
-                $tv = '$__n' . $this->tmpId++;
-                $r = "(is_int({$tv} = {$r}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv}))";
+                [$na, $nr] = $this->inlineGuardVar($r, 'n');
+                $r = "(is_int({$na}) || is_float({$nr}) ? {$nr} : " . self::OPS . "::toNumber({$nr}))";
             }
         }
 
@@ -588,12 +622,12 @@ final class PhpTranspiler
             if ($this->inferType($e->operand) === TypeHint::Numeric) {
                 return '(-' . $operand . ')';
             }
-            $tv = '$__n' . $this->tmpId++;
-            return "(-(is_int({$tv} = {$operand}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv})))";
+            [$na, $nr] = $this->inlineGuardVar($operand, 'n');
+            return "(-(is_int({$na}) || is_float({$nr}) ? {$nr} : " . self::OPS . "::toNumber({$nr})))";
         }
 
         return match ($e->operator) {
-            '!' => '(!' . self::OPS . '::toBoolean(' . $this->emitExpr($e->operand) . '))',
+            '!' => '(!' . $this->emitCondition($e->operand) . ')',
             '~' => '(~(int)' . $this->emitExpr($e->operand) . ')',
             default => throw new RuntimeException("Transpiler: unknown unary op {$e->operator}"),
         };
@@ -762,14 +796,19 @@ final class PhpTranspiler
             // Nullish coalescing: return right if left is null
             return "(({$tmp} = {$left}) === null ? {$right} : {$tmp})";
         }
-        $ops = self::OPS;
+        // Build inline truthiness test: assign left to $tmp, then test $tmp
+        $leftType = $this->inferType($e->left);
+        $test = match ($leftType) {
+            TypeHint::Bool => "({$tmp} = {$left})",
+            TypeHint::String => "(({$tmp} = {$left}) !== '')",
+            TypeHint::Numeric => "(({$tmp} = {$left}) !== 0 && {$tmp} !== 0.0 && (!is_float({$tmp}) || !is_nan({$tmp})))",
+            default => self::OPS . "::toBoolean({$tmp} = {$left})",
+        };
         if ($e->operator === '||') {
-            // JS || returns the first truthy operand (not a boolean)
-            return "({$ops}::toBoolean({$tmp} = {$left}) ? {$tmp} : {$right})";
+            return "({$test} ? {$tmp} : {$right})";
         }
         if ($e->operator === '&&') {
-            // JS && returns the first falsy operand, or the last if all truthy
-            return "({$ops}::toBoolean({$tmp} = {$left}) ? {$right} : {$tmp})";
+            return "({$test} ? {$right} : {$tmp})";
         }
         return "({$left} {$e->operator} {$right})";
     }
@@ -1266,8 +1305,8 @@ final class PhpTranspiler
             'pop' => 'array_pop(' . $obj . ')',
             'shift' => 'array_shift(' . $obj . ')',
             'unshift' => 'array_unshift(' . $obj . ', ' . $a[0] . ')',
-            'filter' => 'array_values(array_filter(' . $obj . ', ' . $a[0] . ', ARRAY_FILTER_USE_BOTH))',
-            'map' => 'array_map(' . $a[0] . ', ' . $obj . ', array_keys(' . $obj . '))',
+            'filter' => $this->callbackUsesIndex($args) ? 'array_values(array_filter(' . $obj . ', ' . $a[0] . ', ARRAY_FILTER_USE_BOTH))' : 'array_values(array_filter(' . $obj . ', ' . $a[0] . '))',
+            'map' => $this->callbackUsesIndex($args) ? 'array_map(' . $a[0] . ', ' . $obj . ', array_keys(' . $obj . '))' : 'array_map(' . $a[0] . ', ' . $obj . ')',
             'reduce' => 'array_reduce(' . $obj . ', ' . $a[0] . (isset($a[1]) ? ', ' . $a[1] : '') . ')',
             'forEach' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { ({$a[0]})(\$__v, \$__i); } })()",
             'every' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (!({$a[0]})(\$__v, \$__i)) return false; } return true; })()",
@@ -1477,6 +1516,39 @@ final class PhpTranspiler
         return "(is_string({$t} = {$obj}) ? str_contains(mb_substr({$t}, (int)({$a[1]}), null, 'UTF-8'), {$a[0]}) : in_array({$a[0]}, array_slice({$t}, (int)({$a[1]})), true))";
     }
 
+    /**
+     * Check if an emitted expression is a simple variable (no side effects, cheap to re-evaluate).
+     * Returns true for `$foo`, false for `$foo['bar']`, `func()`, etc.
+     */
+    private function isSimpleVar(string $emitted): bool
+    {
+        // Simple variable ($foo) or numeric literal (1, 3.14, -5)
+        return (bool) preg_match('/^\$\w+$|^-?\d+(\.\d+)?$/', $emitted);
+    }
+
+    /**
+     * Return [$assign, $ref] for use in inline guards.
+     * For simple vars: $assign = $ref = '$varName' (no temp var needed).
+     * For complex exprs: $assign = '$__t = expr', $ref = '$__t' (caches result).
+     */
+    private function inlineGuardVar(string $emitted, string $prefix): array
+    {
+        if ($this->isSimpleVar($emitted)) {
+            return [$emitted, $emitted];
+        }
+        $t = '$__' . $prefix . $this->tmpId++;
+        return ["({$t} = {$emitted})", $t];
+    }
+
+    /** Check if the first arg (callback) to map/filter/etc uses the index parameter. */
+    private function callbackUsesIndex(array $args): bool
+    {
+        if (!isset($args[0]) || !$args[0] instanceof FunctionExpr) {
+            return true; // unknown callback shape — assume it needs index
+        }
+        return count($args[0]->params) >= 2;
+    }
+
     private function emitConcat(string $obj, array $a, ?TypeHint $objType = null): string
     {
         // Helper: wrap arg for array_merge — cache in temp var to avoid re-evaluation
@@ -1665,7 +1737,24 @@ final class PhpTranspiler
         }
 
         if ($leftType === TypeHint::Numeric && $rightType === TypeHint::Numeric) {
-            return '(!is_nan((float)(' . $left . ')) && !is_nan((float)(' . $right . ')) && ((float)(' . $left . ') == (float)(' . $right . ')))';
+            // When one side is a non-NaN literal, skip its NaN check + cache the other side
+            $leftIsLit = $leftExpr instanceof NumberLiteral && !is_nan($leftExpr->value);
+            $rightIsLit = $rightExpr instanceof NumberLiteral && !is_nan($rightExpr->value);
+            if ($leftIsLit && $rightIsLit) {
+                return '(' . $left . ' == ' . $right . ')';
+            }
+            if ($rightIsLit) {
+                [$la, $lr] = $this->inlineGuardVar($left, 'eq');
+                return "(!is_nan((float)({$la})) && (float)({$lr}) == (float)({$right}))";
+            }
+            if ($leftIsLit) {
+                [$ra, $rr] = $this->inlineGuardVar($right, 'eq');
+                return "(!is_nan((float)({$ra})) && (float)({$left}) == (float)({$rr}))";
+            }
+            // Both non-literal: cache both to avoid double evaluation
+            [$la, $lr] = $this->inlineGuardVar($left, 'eq');
+            [$ra, $rr] = $this->inlineGuardVar($right, 'eq');
+            return "(!is_nan((float)({$la})) && !is_nan((float)({$ra})) && (float)({$lr}) == (float)({$rr}))";
         }
 
         if ($leftType === TypeHint::String && $rightType === TypeHint::String) {
