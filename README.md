@@ -4,7 +4,7 @@ An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subs
 
 Two execution backends:
 - **Bytecode VM** — a stack-based virtual machine with 55 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~18x faster than the VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~22x faster than the VM)
 
 ## Quick start
 
@@ -220,7 +220,7 @@ The transpiler maps ECMAScript constructs directly to PHP equivalents:
 php vendor/bin/phpunit tests/
 ```
 
-676 PHPUnit tests (1479 assertions) across 30 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring, do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, regex, scoping, string methods, switch, template literals, try/catch, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), fuzzing, and edge cases.
+680 PHPUnit tests (1486 assertions) across 30 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring, do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, regex, scoping, string methods, switch, template literals, try/catch, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), fuzzing, and edge cases.
 
 ## Benchmark
 
@@ -232,9 +232,9 @@ Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort,
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~80 ms | ~107x |
-| Transpiled PHP (eval'd) | ~4.3 ms | ~5.8x |
-| Native PHP (hand-written) | ~0.75 ms | 1x |
+| VM (bytecode interpreter) | ~80 ms | ~102x |
+| Transpiled PHP (eval'd) | ~3.5 ms | ~4.7x |
+| Native PHP (hand-written) | ~0.78 ms | 1x |
 
 
 ## License
