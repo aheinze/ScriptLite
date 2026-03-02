@@ -473,9 +473,11 @@ final class PhpTranspiler
                 return '(' . $ls . ' . ' . $rs . ')';
             }
 
-            // Fall through to $__jsAdd for mixed/unknown types
-            // Handles ToPrimitive (arrays→string), string-concat, and numeric-add
-            return self::OPS . '::add(' . $l . ', ' . $r . ')';
+            // Unknown types: inline numeric fast path, fallback to Ops::add
+            // Use & (not &&) so both assignments always execute — prevents undefined $tb on short-circuit
+            $ta = '$__a' . $this->tmpId++;
+            $tb = '$__b' . $this->tmpId++;
+            return "((is_int({$ta} = {$l}) || is_float({$ta})) & (is_int({$tb} = {$r}) || is_float({$tb})) ? {$ta} + {$tb} : " . self::OPS . "::add({$ta}, {$tb}))";
         }
 
         if ($e->operator === '>>>') {
@@ -558,8 +560,14 @@ final class PhpTranspiler
         if (in_array($e->operator, ['-', '*', '%', '**'], true)) {
             $leftType = $this->inferType($e->left);
             $rightType = $this->inferType($e->right);
-            if ($leftType !== TypeHint::Numeric) { $l = self::OPS . '::toNumber(' . $l . ')'; }
-            if ($rightType !== TypeHint::Numeric) { $r = self::OPS . '::toNumber(' . $r . ')'; }
+            if ($leftType !== TypeHint::Numeric) {
+                $tv = '$__n' . $this->tmpId++;
+                $l = "(is_int({$tv} = {$l}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv}))";
+            }
+            if ($rightType !== TypeHint::Numeric) {
+                $tv = '$__n' . $this->tmpId++;
+                $r = "(is_int({$tv} = {$r}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv}))";
+            }
         }
 
         // JS relational ops: convert booleans to numbers (PHP quirk: true < 3 === false)
@@ -575,8 +583,16 @@ final class PhpTranspiler
 
     private function emitUnary(UnaryExpr $e): string
     {
+        if ($e->operator === '-') {
+            $operand = $this->emitExpr($e->operand);
+            if ($this->inferType($e->operand) === TypeHint::Numeric) {
+                return '(-' . $operand . ')';
+            }
+            $tv = '$__n' . $this->tmpId++;
+            return "(-(is_int({$tv} = {$operand}) || is_float({$tv}) ? {$tv} : " . self::OPS . "::toNumber({$tv})))";
+        }
+
         return match ($e->operator) {
-            '-' => '(-' . self::OPS . '::toNumber(' . $this->emitExpr($e->operand) . '))',
             '!' => '(!' . self::OPS . '::toBoolean(' . $this->emitExpr($e->operand) . '))',
             '~' => '(~(int)' . $this->emitExpr($e->operand) . ')',
             default => throw new RuntimeException("Transpiler: unknown unary op {$e->operator}"),

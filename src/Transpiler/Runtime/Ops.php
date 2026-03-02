@@ -521,11 +521,11 @@ final class Ops
      */
     public static function getLength(mixed $value): mixed
     {
-        if (is_string($value)) {
-            return mb_strlen($value, 'UTF-8');
-        }
         if (is_array($value)) {
             return count($value);
+        }
+        if (is_string($value)) {
+            return mb_strlen($value, 'UTF-8');
         }
         if ($value instanceof JSObject) {
             return self::getObjectProperty($value, 'length');

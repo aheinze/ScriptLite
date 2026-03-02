@@ -27,9 +27,7 @@ final class JSObject implements \ArrayAccess, Countable, IteratorAggregate
     public function __construct(array $properties = [], ?self $prototype = null)
     {
         $this->prototype = $prototype;
-        foreach ($properties as $key => $value) {
-            $this->properties[(string) $key] = $value;
-        }
+        $this->properties = $properties;
     }
 
     public function getPrototype(): ?self
