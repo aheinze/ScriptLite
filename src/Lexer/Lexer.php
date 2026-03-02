@@ -239,21 +239,81 @@ final class Lexer
     {
         $startCol = $this->col;
         $this->advance(); // skip opening quote
-        $start = $this->pos;
 
+        $buf = '';
         while ($this->pos < $this->len && $this->src[$this->pos] !== $quote) {
-            if ($this->src[$this->pos] === '\\') {
-                $this->advance(); // skip escape char
+            if ($this->src[$this->pos] === '\\' && $this->pos + 1 < $this->len) {
+                $this->advance(); // skip backslash
+                $ch = $this->src[$this->pos];
+                $buf .= match ($ch) {
+                    'n' => "\n",
+                    't' => "\t",
+                    'r' => "\r",
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    '`' => '`',
+                    '0' => "\0",
+                    'b' => "\x08",
+                    'f' => "\f",
+                    'v' => "\x0B",
+                    'u' => $this->readUnicodeEscape(),
+                    'x' => $this->readHexEscape(),
+                    default => '\\' . $ch,  // unknown escape → keep literal
+                };
+            } else {
+                $buf .= $this->src[$this->pos];
             }
             $this->advance();
         }
 
-        $value = substr($this->src, $start, $this->pos - $start);
         if ($this->pos < $this->len) {
             $this->advance(); // skip closing quote
         }
 
-        return new Token(TokenType::String, $value, $this->line, $startCol);
+        return new Token(TokenType::String, $buf, $this->line, $startCol);
+    }
+
+    /**
+     * Read \uXXXX or \u{XXXXX} Unicode escape sequence.
+     * Cursor is on 'u', returns the decoded character, leaves cursor on last consumed char.
+     */
+    private function readUnicodeEscape(): string
+    {
+        if ($this->pos + 1 < $this->len && $this->src[$this->pos + 1] === '{') {
+            // \u{XXXXX} — variable-length
+            $this->advance(); // skip '{'
+            $hex = '';
+            while ($this->pos + 1 < $this->len && $this->src[$this->pos + 1] !== '}') {
+                $this->advance();
+                $hex .= $this->src[$this->pos];
+            }
+            if ($this->pos + 1 < $this->len) {
+                $this->advance(); // skip '}'
+            }
+            return mb_chr((int) hexdec($hex), 'UTF-8');
+        }
+        // \uXXXX — exactly 4 hex digits
+        $hex = '';
+        for ($i = 0; $i < 4 && $this->pos + 1 < $this->len; $i++) {
+            $this->advance();
+            $hex .= $this->src[$this->pos];
+        }
+        return mb_chr((int) hexdec($hex), 'UTF-8');
+    }
+
+    /**
+     * Read \xXX hex escape sequence.
+     * Cursor is on 'x', returns the decoded character, leaves cursor on last consumed char.
+     */
+    private function readHexEscape(): string
+    {
+        $hex = '';
+        for ($i = 0; $i < 2 && $this->pos + 1 < $this->len; $i++) {
+            $this->advance();
+            $hex .= $this->src[$this->pos];
+        }
+        return chr((int) hexdec($hex));
     }
 
     private function readIdentifier(): Token
@@ -635,9 +695,25 @@ final class Lexer
             }
 
             if ($ch === '\\' && $this->pos + 1 < $this->len) {
-                $text .= $ch;
-                $this->advance();
-                $text .= $this->src[$this->pos];
+                $this->advance(); // skip backslash
+                $esc = $this->src[$this->pos];
+                $text .= match ($esc) {
+                    'n' => "\n",
+                    't' => "\t",
+                    'r' => "\r",
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    '`' => '`',
+                    '$' => '$',
+                    '0' => "\0",
+                    'b' => "\x08",
+                    'f' => "\f",
+                    'v' => "\x0B",
+                    'u' => $this->readUnicodeEscape(),
+                    'x' => $this->readHexEscape(),
+                    default => '\\' . $esc,
+                };
                 $this->advance();
                 continue;
             }

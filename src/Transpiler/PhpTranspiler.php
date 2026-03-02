@@ -197,7 +197,8 @@ final class PhpTranspiler
             $d->params,
             $d->body,
             restParam: $d->restParam,
-            boxFunction: $this->needsBoxedFunction($d->name, false, $d->body)
+            boxFunction: $this->needsBoxedFunction($d->name, false, $d->body),
+            defaults: $d->defaults,
         ) . ";\n";
     }
 
@@ -435,7 +436,12 @@ final class PhpTranspiler
             $e instanceof BooleanLiteral => $e->value ? 'true' : 'false',
             $e instanceof NullLiteral => 'null',
             $e instanceof UndefinedLiteral => 'null',
-            $e instanceof Identifier => '$' . ($this->letRenames[$e->name] ?? $e->name),
+            $e instanceof Identifier => match ($e->name) {
+                'NaN' => 'NAN',
+                'Infinity' => 'INF',
+                'undefined' => 'null',
+                default => '$' . ($this->letRenames[$e->name] ?? $e->name),
+            },
             $e instanceof BinaryExpr => $this->emitBinary($e),
             $e instanceof UnaryExpr => $this->emitUnary($e),
             $e instanceof AssignExpr => $this->emitAssign($e),
@@ -938,6 +944,13 @@ final class PhpTranspiler
             if ($e->object instanceof Identifier && $e->object->name === 'Math') {
                 return match ($name) {
                     'PI' => 'M_PI',
+                    'E' => 'M_E',
+                    'LN2' => 'M_LN2',
+                    'LN10' => 'M_LN10',
+                    'LOG2E' => 'M_LOG2E',
+                    'LOG10E' => 'M_LOG10E',
+                    'SQRT1_2' => 'M_SQRT1_2',   // PHP has no M_SQRT1_2 constant
+                    'SQRT2' => 'M_SQRT2',
                     default => "\${$e->object->name}['{$name}']",
                 };
             }
@@ -951,6 +964,20 @@ final class PhpTranspiler
                     'NEGATIVE_INFINITY' => '-INF',
                     'NaN' => 'NAN',
                     'EPSILON' => '2.2204460492503131e-16',
+                    default => "\${$e->object->name}['{$name}']",
+                };
+            }
+
+            // Object static method aliases (e.g. var keys = Object.keys)
+            if ($e->object instanceof Identifier && $e->object->name === 'Object') {
+                return match ($name) {
+                    'keys' => 'static function($value = null) { return ' . self::OPS . '::keys($value); }',
+                    'values' => 'static function($value = null) { return ' . self::OPS . '::values($value); }',
+                    'entries' => 'static function($value = null) { return ' . self::OPS . '::entries($value); }',
+                    'assign' => 'static function($target = null, ...$sources) { return ' . self::OPS . '::objectAssign($target, ...$sources); }',
+                    'is' => 'static function($a = null, $b = null) { return ' . self::OPS . '::objectIs($a, $b); }',
+                    'create' => 'static function($proto = null) { return ' . self::OPS . '::objectCreate($proto); }',
+                    'freeze' => 'static function($obj = null) { return $obj; }',
                     default => "\${$e->object->name}['{$name}']",
                 };
             }
@@ -1112,6 +1139,10 @@ final class PhpTranspiler
                 'isFinite' => 'is_finite(' . self::OPS . '::toNumber(' . $args[0] . '))',
                 'parseInt' => self::OPS . '::parseInt(' . implode(', ', $args) . ')',
                 'parseFloat' => '(is_numeric($__pf = (string)(' . $args[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
+                'encodeURIComponent' => 'rawurlencode((string)(' . $args[0] . '))',
+                'decodeURIComponent' => 'rawurldecode((string)(' . $args[0] . '))',
+                'encodeURI' => 'str_replace([\'%3A\', \'%2F\', \'%3F\', \'%23\', \'%5B\', \'%5D\', \'%40\', \'%21\', \'%24\', \'%26\', \'%27\', \'%28\', \'%29\', \'%2A\', \'%2B\', \'%2C\', \'%3B\', \'%3D\'], [\':\', \'/\', \'?\', \'#\', \'[\', \']\', \'@\', \'!\', \'$\', \'&\', "\'", \'(\', \')\', \'*\', \'+\', \',\', \';\', \'=\'], rawurlencode((string)(' . $args[0] . ')))',
+                'decodeURI' => 'rawurldecode((string)(' . $args[0] . '))',
                 default => null,
             };
             if ($mapped !== null) {
@@ -1195,10 +1226,28 @@ final class PhpTranspiler
                 'floor' => '(int)floor(' . $a[0] . ')',
                 'ceil' => '(int)ceil(' . $a[0] . ')',
                 'abs' => 'abs(' . $a[0] . ')',
-                'max' => 'max(' . $a[0] . ', ' . $a[1] . ')',
-                'min' => 'min(' . $a[0] . ', ' . $a[1] . ')',
+                'max' => 'max(' . implode(', ', $a) . ')',
+                'min' => 'min(' . implode(', ', $a) . ')',
                 'round' => '(int)round(' . $a[0] . ')',
                 'random' => '(mt_rand() / mt_getrandmax())',
+                'sqrt' => 'sqrt(' . $a[0] . ')',
+                'pow' => '((' . $a[0] . ') ** (' . $a[1] . '))',
+                'sin' => 'sin(' . $a[0] . ')',
+                'cos' => 'cos(' . $a[0] . ')',
+                'tan' => 'tan(' . $a[0] . ')',
+                'asin' => 'asin(' . $a[0] . ')',
+                'acos' => 'acos(' . $a[0] . ')',
+                'atan' => 'atan(' . $a[0] . ')',
+                'atan2' => 'atan2(' . $a[0] . ', ' . $a[1] . ')',
+                'log' => 'log(' . $a[0] . ')',
+                'log2' => 'log(' . $a[0] . ', 2)',
+                'log10' => 'log10(' . $a[0] . ')',
+                'exp' => 'exp(' . $a[0] . ')',
+                'cbrt' => '((' . $a[0] . ') ** (1/3))',
+                'hypot' => 'sqrt((' . $a[0] . ') ** 2 + (' . $a[1] . ') ** 2)',
+                'sign' => '((' . $a[0] . ') <=> 0)',
+                'trunc' => '(int)(' . $a[0] . ')',
+                'clz32' => '(' . $a[0] . ' === 0 ? 32 : (31 - (int)floor(log((' . $a[0] . ') & 0xFFFFFFFF, 2))))',
                 default => $dynamicMethod . '(' . implode(', ', $a) . ')',
             };
         }
@@ -1238,6 +1287,9 @@ final class PhpTranspiler
                 'values' => self::OPS . '::values(' . $a[0] . ')',
                 'entries' => self::OPS . '::entries(' . $a[0] . ')',
                 'assign' => self::OPS . '::objectAssign(' . implode(', ', $a) . ')',
+                'is' => self::OPS . '::objectIs(' . $a[0] . ', ' . $a[1] . ')',
+                'create' => self::OPS . '::objectCreate(' . $a[0] . ')',
+                'freeze' => $a[0],  // freeze is a no-op in transpiled path (no enforcement)
                 default => $dynamicMethod . '(' . implode(', ', $a) . ')',
             };
         }
@@ -1272,6 +1324,19 @@ final class PhpTranspiler
             return match ($method) {
                 'fromCharCode' => 'implode("", array_map(fn($c) => mb_chr((int)$c, "UTF-8"), [' . implode(', ', $a) . ']))',
                 default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            };
+        }
+
+        // ── Number methods (.toFixed, .toPrecision, .toExponential, .toString) ──
+        if ($method === 'toFixed' || $method === 'toPrecision' || $method === 'toExponential' || $method === 'toString') {
+            $a = $emitArgs();
+            return match ($method) {
+                'toFixed' => 'number_format((float)(' . $obj . '), (int)(' . ($a[0] ?? '0') . '), \'.\', \'\')',
+                'toPrecision' => self::OPS . '::toPrecision((float)(' . $obj . '), (int)(' . ($a[0] ?? '0') . '))',
+                'toExponential' => self::OPS . '::toExponential((float)(' . $obj . '), ' . ($a[0] ?? 'null') . ')',
+                'toString' => isset($a[0])
+                    ? 'base_convert((string)(int)(' . $obj . '), 10, (int)(' . $a[0] . '))'
+                    : '(string)(' . $obj . ')',
             };
         }
 
@@ -1327,6 +1392,9 @@ final class PhpTranspiler
                 ? 'array_splice(' . $obj . ', ' . $a[0] . ', ' . $a[1] . ', [' . implode(', ', array_slice($a, 2)) . '])'
                 : 'array_splice(' . $obj . ', ' . implode(', ', $a) . ')',
             'fill' => "(function(){$use} { for (\$__i = " . ($a[1] ?? '0') . "; \$__i < " . ($a[2] ?? 'count(' . $obj . ')') . "; \$__i++) { {$obj}[\$__i] = {$a[0]}; } return {$obj}; })()",
+            'findLast' => "(function(){$use} { foreach (array_reverse({$obj}, true) as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__v; } return null; })()",
+            'findLastIndex' => "(function(){$use} { foreach (array_reverse({$obj}, true) as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__i; } return -1; })()",
+            'flatMap' => "array_merge(...array_map(fn(\$__v, \$__i) => (array)(({$a[0]})(\$__v, \$__i)), {$obj}, array_keys({$obj})))",
 
             // ── String methods ──
             'split' => $this->emitStrSplit($obj, $a, $args),
@@ -1342,12 +1410,14 @@ final class PhpTranspiler
             'endsWith' => $this->emitEndsWith($obj, $a),
             'repeat' => 'str_repeat(' . $obj . ', (int)' . $a[0] . ')',
             'replace' => $this->emitStrReplace($obj, $a, $args),
+            'replaceAll' => 'str_replace(' . $a[0] . ', ' . $a[1] . ', ' . $obj . ')',
             'match' => $this->emitStrMatch($obj, $a, $args),
             'matchAll' => $this->emitStrMatchAll($obj, $a, $args),
             'search' => $this->emitStrSearch($obj, $a, $args),
             'padStart' => $this->emitPadStart($obj, $a),
             'padEnd' => $this->emitPadEnd($obj, $a),
             'lastIndexOf' => $this->emitLastIndexOf($obj, $a),
+            'at' => self::OPS . '::at(' . $obj . ', (int)(' . $a[0] . '))',
 
             // ── Object methods ──
             'hasOwnProperty' => $objectType === TypeHint::Object_
@@ -1607,6 +1677,7 @@ final class PhpTranspiler
             $expr->isArrow,
             $expr->restParam,
             $forceBox || $this->needsBoxedFunction($boundName ?? $expr->name, $expr->isArrow, $expr->body),
+            $expr->defaults,
         );
     }
 
@@ -1616,7 +1687,8 @@ final class PhpTranspiler
         array $body,
         bool $isArrow = false,
         ?string $restParam = null,
-        bool $boxFunction = true
+        bool $boxFunction = true,
+        array $defaults = [],
     ): string
     {
         $isConstructor = !$isArrow && $this->bodyContainsThis($body);
@@ -1656,7 +1728,11 @@ final class PhpTranspiler
             $useClause = ' use (' . implode(', ', $refs) . ')';
         }
 
-        $paramList = array_map(fn($p) => '$' . $p, $params);
+        $paramList = [];
+        foreach ($params as $i => $p) {
+            $hasDefault = isset($defaults[$i]) && $defaults[$i] !== null;
+            $paramList[] = '$' . $p . ($hasDefault ? ' = null' : '');
+        }
         if ($restParam !== null) {
             $paramList[] = '...$' . $restParam;
         }
@@ -1668,6 +1744,16 @@ final class PhpTranspiler
         $savedVarTypes = $this->varTypes;
 
         $innerCode = '';
+
+        // Default parameter assignments
+        foreach ($defaults as $i => $defaultExpr) {
+            if ($defaultExpr === null) {
+                continue;
+            }
+            $pName = '$' . $params[$i];
+            $innerCode .= "if ({$pName} === null) { {$pName} = " . $this->emitExpr($defaultExpr) . "; }\n";
+        }
+
         if ($isConstructor) {
             $innerCode .= '$__this = new ' . self::JS_OBJECT . "(['__scriptlite_ctor' => true]);\n";
         }
@@ -2225,10 +2311,11 @@ final class PhpTranspiler
 
     private function escapeStr(string $s): string
     {
-        if (str_contains($s, "\n") || str_contains($s, "\r") || str_contains($s, "\t")) {
+        // Check if string contains any control characters that need double-quoted PHP string
+        if (preg_match('/[\x00-\x1F\x7F]/', $s)) {
             $escaped = str_replace(
-                ["\\", "\$", "\"", "\n", "\r", "\t"],
-                ["\\\\", "\\\$", "\\\"", "\\n", "\\r", "\\t"],
+                ["\\", "\$", "\"", "\n", "\r", "\t", "\0", "\x08", "\f", "\x0B"],
+                ["\\\\", "\\\$", "\\\"", "\\n", "\\r", "\\t", "\\0", "\\x08", "\\f", "\\v"],
                 $s,
             );
             return '"' . $escaped . '"';

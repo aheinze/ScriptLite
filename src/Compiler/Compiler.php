@@ -173,7 +173,7 @@ final class Compiler
 
     private function compileFunctionDeclarationHoist(FunctionDeclaration $decl): void
     {
-        $descriptor = $this->compileFunction($decl->name, $decl->params, $decl->body, $decl->restParam);
+        $descriptor = $this->compileFunction($decl->name, $decl->params, $decl->body, $decl->restParam, $decl->defaults);
         $descIdx    = $this->addConstant($descriptor);
 
         $this->emit(OpCode::MakeClosure, $descIdx);
@@ -1134,7 +1134,7 @@ final class Compiler
 
     private function compileFunctionExpr(FunctionExpr $expr): void
     {
-        $descriptor = $this->compileFunction($expr->name, $expr->params, $expr->body, $expr->restParam);
+        $descriptor = $this->compileFunction($expr->name, $expr->params, $expr->body, $expr->restParam, $expr->defaults);
         $descIdx    = $this->addConstant($descriptor);
         $this->emit(OpCode::MakeClosure, $descIdx);
     }
@@ -1199,13 +1199,41 @@ final class Compiler
      * @param string[] $params
      * @param Stmt[]   $body
      */
-    private function compileFunction(?string $name, array $params, array $body, ?string $restParam = null): FunctionDescriptor
+    private function compileFunction(?string $name, array $params, array $body, ?string $restParam = null, array $defaults = []): FunctionDescriptor
     {
         // Create a child compiler to get a fresh constant/name pool
         $child = new self();
 
         // Analyze locals for register allocation
         $child->analyzeLocals($params, $body, $restParam);
+
+        // Emit default parameter assignments:
+        // if (param === undefined) param = defaultExpr;
+        foreach ($defaults as $i => $defaultExpr) {
+            if ($defaultExpr === null) {
+                continue;
+            }
+            $paramName = $params[$i];
+            // Load the parameter value
+            if (isset($child->regMap[$paramName])) {
+                $child->emit(OpCode::GetReg, $child->regMap[$paramName]);
+            } else {
+                $child->emit(OpCode::GetVar, $child->addName($paramName));
+            }
+            // Check if it's undefined → jump over the default assignment
+            $child->emit(OpCode::Const, $child->addConstant(JsUndefined::Value));
+            $child->emit(OpCode::StrictNeq);
+            $jumpIfDefined = $child->emitJump(OpCode::JumpIfTrue);
+            // Param is undefined → assign the default
+            $child->compileExpr($defaultExpr);
+            if (isset($child->regMap[$paramName])) {
+                $child->emit(OpCode::SetReg, $child->regMap[$paramName]);
+            } else {
+                $child->emit(OpCode::SetVar, $child->addName($paramName));
+            }
+            $child->emit(OpCode::Pop); // discard the set result
+            $child->patchJump($jumpIfDefined);
+        }
 
         // Hoist function declarations
         foreach ($body as $stmt) {

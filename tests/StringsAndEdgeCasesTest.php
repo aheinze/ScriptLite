@@ -21,6 +21,13 @@ class StringsAndEdgeCasesTest extends ScriptLiteTestCase
         $this->assertBothBackends('"Number: " + 42', 'Number: 42');
     }
 
+    public function testStringEscapeSequences(): void
+    {
+        $this->assertBothBackends('"line1\nline2"', "line1\nline2");
+        $this->assertBothBackends('"a\tb"', "a\tb");
+        $this->assertBothBackends('"\u0041\x42"', 'AB');
+    }
+
     // ═══════════════════ Edge Cases ═══════════════════
 
     public function testBooleanLogic(): void

@@ -123,6 +123,18 @@ class ArraysTest extends ScriptLiteTestCase
         $this->assertBothBackends('[1, 2, 3, 4, 5].slice(1, 4)', [2, 3, 4]);
     }
 
+    public function testArrayAt(): void
+    {
+        $this->assertBothBackends('[10, 20, 30].at(1)', 20);
+        $this->assertBothBackends('[10, 20, 30].at(-1)', 30);
+    }
+
+    public function testArrayAtOutOfBounds(): void
+    {
+        $this->assertBothBackends('[10, 20].at(99)', null);
+        $this->assertBothBackends('[10, 20].at(-99)', null);
+    }
+
     public function testNestedArrays(): void
     {
         $this->assertBothBackends('
@@ -239,6 +251,18 @@ class ArraysTest extends ScriptLiteTestCase
         $this->assertBothBackends('[1, 2, 3].findIndex(function(x) { return x > 10; })', -1);
     }
 
+    public function testArrayFindLast(): void
+    {
+        $this->assertBothBackends('[1, 2, 3, 4, 5].findLast(function(x) { return x % 2 === 0; })', 4);
+        $this->assertBothBackends('[1, 3, 5].findLast(function(x) { return x % 2 === 0; })', null);
+    }
+
+    public function testArrayFindLastIndex(): void
+    {
+        $this->assertBothBackends('[1, 2, 3, 4].findLastIndex(function(x) { return x < 4; })', 2);
+        $this->assertBothBackends('[2, 4, 6].findLastIndex(function(x) { return x % 2 !== 0; })', -1);
+    }
+
     public function testArrayReduce(): void
     {
         $this->assertBothBackends('[1, 2, 3, 4].reduce(function(acc, x) { return acc + x; }, 0)', 10);
@@ -317,6 +341,14 @@ class ArraysTest extends ScriptLiteTestCase
     public function testArrayFlat(): void
     {
         $this->assertBothBackends('[[1, 2], [3, 4], [5]].flat()', [1, 2, 3, 4, 5]);
+    }
+
+    public function testArrayFlatMap(): void
+    {
+        $this->assertBothBackends(
+            '[1, 2, 3].flatMap(function(x) { return [x, x * 2]; })',
+            [1, 2, 2, 4, 3, 6]
+        );
     }
 
     public function testArrayFill(): void

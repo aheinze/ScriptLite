@@ -16,6 +16,9 @@ final class JsObject
     /** @var array<string, mixed> */
     public array $properties;
 
+    /** Prototype object for Object.create()/prototype-chain reads */
+    public ?self $prototype = null;
+
     /** Constructor function that created this object (for instanceof) */
     public ?JsClosure $constructor;
 
@@ -51,6 +54,10 @@ final class JsObject
 
         if (array_key_exists($k, $this->properties)) {
             return $this->properties[$k];
+        }
+
+        if ($this->prototype !== null) {
+            return $this->prototype->get($k, $invoker);
         }
 
         return JsUndefined::Value;

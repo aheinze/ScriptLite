@@ -185,6 +185,11 @@ class StringMethodsTest extends ScriptLiteTestCase
         $this->assertBothBackends('"hello".replace("xyz", "abc")', 'hello');
     }
 
+    public function testReplaceAll(): void
+    {
+        $this->assertBothBackends('"hello hello".replaceAll("l", "x")', 'hexxo hexxo');
+    }
+
     // ═══════════════════ repeat ═══════════════════
 
     public function testRepeat(): void
@@ -210,6 +215,20 @@ class StringMethodsTest extends ScriptLiteTestCase
     public function testPadStartNoOpWhenLongEnough(): void
     {
         $this->assertBothBackends('"hello".padStart(3, "x")', 'hello');
+    }
+
+    // ═══════════════════ at ═══════════════════
+
+    public function testStringAt(): void
+    {
+        $this->assertBothBackends('"hello".at(1)', 'e');
+        $this->assertBothBackends('"hello".at(-1)', 'o');
+    }
+
+    public function testStringAtOutOfBounds(): void
+    {
+        $this->assertBothBackends('"hello".at(99)', null);
+        $this->assertBothBackends('"hello".at(-99)', null);
     }
 
     // ═══════════════════ concat ═══════════════════

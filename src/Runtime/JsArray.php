@@ -282,6 +282,43 @@ final class JsArray
                 }
                 return false;
             }) : null,
+            'findLast' => $invoker !== null ? new NativeFunction('findLast', function (mixed $fn) use ($invoker) {
+                for ($i = count($this->elements) - 1; $i >= 0; $i--) {
+                    if ($invoker($fn, [$this->elements[$i], $i])) {
+                        return $this->elements[$i];
+                    }
+                }
+                return JsUndefined::Value;
+            }) : null,
+            'findLastIndex' => $invoker !== null ? new NativeFunction('findLastIndex', function (mixed $fn) use ($invoker) {
+                for ($i = count($this->elements) - 1; $i >= 0; $i--) {
+                    if ($invoker($fn, [$this->elements[$i], $i])) {
+                        return $i;
+                    }
+                }
+                return -1;
+            }) : null,
+            'flatMap' => $invoker !== null ? new NativeFunction('flatMap', function (mixed $fn) use ($invoker) {
+                $result = [];
+                foreach ($this->elements as $i => $el) {
+                    $mapped = $invoker($fn, [$el, $i]);
+                    if ($mapped instanceof JsArray) {
+                        foreach ($mapped->elements as $item) {
+                            $result[] = $item;
+                        }
+                    } else {
+                        $result[] = $mapped;
+                    }
+                }
+                return new JsArray($result);
+            }) : null,
+            'at' => new NativeFunction('at', function (mixed $index = 0) {
+                $i = (int) $index;
+                if ($i < 0) {
+                    $i += count($this->elements);
+                }
+                return $this->elements[$i] ?? JsUndefined::Value;
+            }),
 
             default => null,
         };

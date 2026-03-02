@@ -134,6 +134,28 @@ class NumberObjectTest extends ScriptLiteTestCase
         self::assertNan($this->engine->eval('Number.NaN'));
     }
 
+    // ═══════════════════ Number Prototype Methods ═══════════════════
+
+    public function testNumberToFixed(): void
+    {
+        $this->assertBothBackends('var n = 12.345; n.toFixed(2)', '12.35');
+    }
+
+    public function testNumberToPrecision(): void
+    {
+        $this->assertBothBackends('var n = 12.345; n.toPrecision(4)', '12.35');
+    }
+
+    public function testNumberToPrecisionWithoutDigits(): void
+    {
+        $this->assertBothBackends('var n = 12.34; n.toPrecision()', '12.34');
+    }
+
+    public function testNumberToExponential(): void
+    {
+        $this->assertBothBackends('var n = 12.34; n.toExponential(1)', '1.2e+1');
+    }
+
     // ═══════════════════ Global parseInt / parseFloat ═══════════════════
 
     public function testGlobalParseInt(): void

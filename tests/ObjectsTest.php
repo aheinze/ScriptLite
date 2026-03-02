@@ -282,4 +282,56 @@ class ObjectsTest extends ScriptLiteTestCase
     {
         $this->assertBothBackends('Object.keys({})', []);
     }
+
+    public function testObjectIs(): void
+    {
+        $this->assertBothBackends('Object.is(0/0, 0/0)', true);
+        $this->assertBothBackends('Object.is({}, {})', false);
+    }
+
+    public function testObjectCreate(): void
+    {
+        $this->assertBothBackends('
+            var proto = {greeting: "hi"};
+            var obj = Object.create(proto);
+            obj.greeting;
+        ', 'hi');
+    }
+
+    public function testObjectFreezeReturnsSameObject(): void
+    {
+        $this->assertBothBackends('
+            var obj = {a: 1};
+            var frozen = Object.freeze(obj);
+            frozen.a = 2;
+            obj.a;
+        ', 2);
+    }
+
+    public function testObjectStaticMethodAliases(): void
+    {
+        $this->assertBothBackends('
+            var keys = Object.keys;
+            keys({a: 1, b: 2});
+        ', ['a', 'b']);
+
+        $this->assertBothBackends('
+            var make = Object.create;
+            var obj = make({answer: 42});
+            obj.answer;
+        ', 42);
+
+        $this->assertBothBackends('
+            var same = Object.is;
+            same(0/0, 0/0);
+        ', true);
+
+        $this->assertBothBackends('
+            var freeze = Object.freeze;
+            var obj = {value: 1};
+            var frozen = freeze(obj);
+            frozen.value = 2;
+            obj.value;
+        ', 2);
+    }
 }

@@ -623,6 +623,81 @@ final class Ops
         return (int) $s;
     }
 
+    /**
+     * JS Number.prototype.toPrecision(digits).
+     */
+    public static function toPrecision(float $n, int $digits): string
+    {
+        if ($digits <= 0) {
+            return (string) $n;
+        }
+        return rtrim(rtrim(sprintf("%.{$digits}g", $n), '0'), '.');
+    }
+
+    /**
+     * JS Number.prototype.toExponential(fractionDigits).
+     */
+    public static function toExponential(float $n, mixed $digits = null): string
+    {
+        $d = $digits === null ? 6 : (int) $digits;
+        $s = sprintf("%.{$d}e", $n);
+        // PHP uses e+01 format, JS uses e+1 — normalize
+        return preg_replace('/e([+-])0*(\d)/', 'e$1$2', $s);
+    }
+
+    /**
+     * JS .at() — negative-index-aware element access for strings and arrays.
+     */
+    public static function at(mixed $target, int $index): mixed
+    {
+        if (is_string($target)) {
+            $len = mb_strlen($target, 'UTF-8');
+            if ($index < 0) {
+                $index += $len;
+            }
+            if ($index < 0 || $index >= $len) {
+                return null;
+            }
+            return mb_substr($target, $index, 1, 'UTF-8');
+        }
+        if (is_array($target)) {
+            $len = count($target);
+            if ($index < 0) {
+                $index += $len;
+            }
+            return $target[$index] ?? null;
+        }
+        return null;
+    }
+
+    /**
+     * JS Object.is() — same-value equality (distinguishes +0/-0 and NaN===NaN).
+     */
+    public static function objectIs(mixed $a, mixed $b): bool
+    {
+        if (is_float($a) && is_float($b)) {
+            if (is_nan($a) && is_nan($b)) {
+                return true;
+            }
+            if ($a === 0.0 && $b === 0.0) {
+                return (1 / $a) === (1 / $b);
+            }
+        }
+        return $a === $b;
+    }
+
+    /**
+     * JS Object.create() — create object with prototype.
+     */
+    public static function objectCreate(mixed $proto): JSObject
+    {
+        $obj = new JSObject();
+        if ($proto instanceof JSObject) {
+            $obj->prototype = $proto;
+        }
+        return $obj;
+    }
+
     public static function jsonStringify(mixed $value): string|false
     {
         return json_encode(

@@ -1246,6 +1246,8 @@ final class VirtualMachine
             } else {
                 $this->push($this->getStringMethod($obj, (string) $key));
             }
+        } elseif (is_int($obj) || is_float($obj)) {
+            $this->push($this->getNumberMethod($obj, (string) $key));
         } else {
             $this->push(JsUndefined::Value);
         }
@@ -1359,6 +1361,20 @@ final class VirtualMachine
                 }
                 return mb_substr($str, 0, $pos) . $r . mb_substr($str, $pos + mb_strlen($s));
             }),
+            'replaceAll' => new NativeFunction('replaceAll', function (mixed $search, mixed $replacement) use ($str) {
+                return str_replace((string) $search, (string) $replacement, $str);
+            }),
+            'at' => new NativeFunction('at', function (mixed $index = 0) use ($str) {
+                $i = (int) $index;
+                $len = mb_strlen($str);
+                if ($i < 0) {
+                    $i += $len;
+                }
+                if ($i < 0 || $i >= $len) {
+                    return JsUndefined::Value;
+                }
+                return mb_substr($str, $i, 1);
+            }),
             'repeat' => new NativeFunction('repeat', function (mixed $count = 0) use ($str) {
                 $n = (int) $count;
                 return $n > 0 ? str_repeat($str, $n) : '';
@@ -1440,6 +1456,34 @@ final class VirtualMachine
                     return $m[0][1];
                 }
                 return -1;
+            }),
+            default => JsUndefined::Value,
+        };
+    }
+
+    private function getNumberMethod(int|float $num, string $name): mixed
+    {
+        return match ($name) {
+            'toFixed' => new NativeFunction('toFixed', function (mixed $digits = 0) use ($num) {
+                return number_format((float) $num, (int) $digits, '.', '');
+            }),
+            'toPrecision' => new NativeFunction('toPrecision', function (mixed $digits = null) use ($num) {
+                if ($digits === null || $digits === JsUndefined::Value) {
+                    return (string) $num;
+                }
+                $d = (int) $digits;
+                return rtrim(rtrim(sprintf("%.{$d}g", (float) $num), '0'), '.');
+            }),
+            'toExponential' => new NativeFunction('toExponential', function (mixed $digits = null) use ($num) {
+                $d = ($digits === null || $digits === JsUndefined::Value) ? 6 : (int) $digits;
+                $s = sprintf("%.{$d}e", (float) $num);
+                return preg_replace('/e([+-])0*(\d)/', 'e$1$2', $s);
+            }),
+            'toString' => new NativeFunction('toString', function (mixed $radix = null) use ($num) {
+                if ($radix !== null && $radix !== JsUndefined::Value) {
+                    return base_convert((string) (int) $num, 10, (int) $radix);
+                }
+                return (string) $num;
             }),
             default => JsUndefined::Value,
         };
@@ -1645,8 +1689,8 @@ final class VirtualMachine
         $mathFloor = new NativeFunction('Math.floor', fn(float $n) => floor($n));
         $mathCeil  = new NativeFunction('Math.ceil', fn(float $n) => ceil($n));
         $mathAbs   = new NativeFunction('Math.abs', fn(float $n) => abs($n));
-        $mathMax   = new NativeFunction('Math.max', fn(float $a, float $b) => max($a, $b));
-        $mathMin   = new NativeFunction('Math.min', fn(float $a, float $b) => min($a, $b));
+        $mathMax   = new NativeFunction('Math.max', fn(float ...$args) => max($args));
+        $mathMin   = new NativeFunction('Math.min', fn(float ...$args) => min($args));
         $mathRound = new NativeFunction('Math.round', fn(float $n) => round($n));
         $mathRandom = new NativeFunction('Math.random', fn() => (float) mt_rand() / (float) mt_getrandmax());
         $env->define('Math', new JsObject([
@@ -1657,7 +1701,32 @@ final class VirtualMachine
             'min'    => $mathMin,
             'round'  => $mathRound,
             'random' => $mathRandom,
-            'PI'     => M_PI,
+            'sqrt'   => new NativeFunction('Math.sqrt', fn(float $n) => sqrt($n)),
+            'pow'    => new NativeFunction('Math.pow', fn(float $b, float $e) => $b ** $e),
+            'sin'    => new NativeFunction('Math.sin', fn(float $n) => sin($n)),
+            'cos'    => new NativeFunction('Math.cos', fn(float $n) => cos($n)),
+            'tan'    => new NativeFunction('Math.tan', fn(float $n) => tan($n)),
+            'asin'   => new NativeFunction('Math.asin', fn(float $n) => asin($n)),
+            'acos'   => new NativeFunction('Math.acos', fn(float $n) => acos($n)),
+            'atan'   => new NativeFunction('Math.atan', fn(float $n) => atan($n)),
+            'atan2'  => new NativeFunction('Math.atan2', fn(float $y, float $x) => atan2($y, $x)),
+            'log'    => new NativeFunction('Math.log', fn(float $n) => log($n)),
+            'log2'   => new NativeFunction('Math.log2', fn(float $n) => log($n, 2)),
+            'log10'  => new NativeFunction('Math.log10', fn(float $n) => log10($n)),
+            'exp'    => new NativeFunction('Math.exp', fn(float $n) => exp($n)),
+            'cbrt'   => new NativeFunction('Math.cbrt', fn(float $n) => $n ** (1/3)),
+            'hypot'  => new NativeFunction('Math.hypot', fn(float $a, float $b) => sqrt($a ** 2 + $b ** 2)),
+            'sign'   => new NativeFunction('Math.sign', fn(float $n) => $n <=> 0),
+            'trunc'  => new NativeFunction('Math.trunc', fn(float $n) => (int) $n),
+            'clz32'  => new NativeFunction('Math.clz32', fn(float $n) => $n === 0.0 ? 32 : (31 - (int) floor(log(((int) $n) & 0xFFFFFFFF, 2)))),
+            'PI'      => M_PI,
+            'E'       => M_E,
+            'LN2'     => M_LN2,
+            'LN10'    => M_LN10,
+            'LOG2E'   => M_LOG2E,
+            'LOG10E'  => M_LOG10E,
+            'SQRT1_2' => M_SQRT1_2,
+            'SQRT2'   => M_SQRT2,
         ]));
         // Legacy flat names
         $env->define('Math_floor', $mathFloor);
@@ -1703,6 +1772,27 @@ final class VirtualMachine
                     }
                 }
                 return $target;
+            }),
+            'is' => new NativeFunction('Object.is', function (mixed $a, mixed $b) {
+                if (is_float($a) && is_float($b)) {
+                    if (is_nan($a) && is_nan($b)) {
+                        return true;
+                    }
+                    if ($a === 0.0 && $b === 0.0) {
+                        return (1 / $a) === (1 / $b);
+                    }
+                }
+                return $a === $b;
+            }),
+            'create' => new NativeFunction('Object.create', function (mixed $proto) {
+                $obj = new JsObject();
+                if ($proto instanceof JsObject) {
+                    $obj->prototype = $proto;
+                }
+                return $obj;
+            }),
+            'freeze' => new NativeFunction('Object.freeze', function (mixed $obj) {
+                return $obj; // no-op — freeze semantics not enforced
             }),
         ]));
 
@@ -1848,6 +1938,24 @@ final class VirtualMachine
             $n = $vm->toNumber($val);
             return is_finite($n);
         }));
+
+        // ── Global constants ──
+        $env->define('NaN', NAN);
+        $env->define('Infinity', INF);
+        $env->define('undefined', JsUndefined::Value);
+
+        // ── URI encoding/decoding ──
+        $env->define('encodeURIComponent', new NativeFunction('encodeURIComponent', fn(mixed $str) => rawurlencode((string) $str)));
+        $env->define('decodeURIComponent', new NativeFunction('decodeURIComponent', fn(mixed $str) => rawurldecode((string) $str)));
+        $env->define('encodeURI', new NativeFunction('encodeURI', function (mixed $str) {
+            $encoded = rawurlencode((string) $str);
+            return str_replace(
+                ['%3A', '%2F', '%3F', '%23', '%5B', '%5D', '%40', '%21', '%24', '%26', '%27', '%28', '%29', '%2A', '%2B', '%2C', '%3B', '%3D'],
+                [':', '/', '?', '#', '[', ']', '@', '!', '$', '&', "'", '(', ')', '*', '+', ',', ';', '='],
+                $encoded
+            );
+        }));
+        $env->define('decodeURI', new NativeFunction('decodeURI', fn(mixed $str) => rawurldecode((string) $str)));
 
         return $env;
     }

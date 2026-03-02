@@ -97,6 +97,46 @@ class FunctionsTest extends ScriptLiteTestCase
         ', 3628800);
     }
 
+    public function testDefaultParameterAppliedWhenMissing(): void
+    {
+        $this->assertBothBackends('
+            function add(a, b = 2) {
+                return a + b;
+            }
+            add(3);
+        ', 5);
+    }
+
+    public function testDefaultParameterCanBeOverridden(): void
+    {
+        $this->assertBothBackends('
+            function add(a, b = 2) {
+                return a + b;
+            }
+            add(3, 4);
+        ', 7);
+    }
+
+    public function testDefaultParameterAppliesToUndefined(): void
+    {
+        $this->assertBothBackends('
+            function pick(x = 10) {
+                return x;
+            }
+            pick(undefined);
+        ', 10);
+    }
+
+    public function testDefaultParameterCanReferenceEarlierParameter(): void
+    {
+        $this->assertBothBackends('
+            function next(a, b = a + 1) {
+                return b;
+            }
+            next(4);
+        ', 5);
+    }
+
     // ═══════════════════ Scope Isolation ═══════════════════
 
     public function testFunctionScopeDoesNotLeak(): void

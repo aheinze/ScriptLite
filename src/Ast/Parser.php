@@ -210,10 +210,10 @@ final class Parser
     {
         $this->expect(TokenType::Function);
         $name   = $this->expect(TokenType::Identifier, 'Expected function name')->value;
-        [$params, $restParam] = $this->parseParamList();
+        [$params, $restParam, $defaults] = $this->parseParamList();
         $body   = $this->parseBlockBody();
 
-        return new FunctionDeclaration($name, $params, $body, $restParam);
+        return new FunctionDeclaration($name, $params, $body, $restParam, $defaults);
     }
 
     private function parseReturnStatement(): ReturnStmt
@@ -663,13 +663,20 @@ final class Parser
         if ($this->current->type === TokenType::Arrow) {
             $this->advance();
             $params = [];
+            $defaults = [];
             foreach ($exprs as $expr) {
-                if (!$expr instanceof Identifier) {
+                if ($expr instanceof Identifier) {
+                    $params[] = $expr->name;
+                    $defaults[] = null;
+                } elseif ($expr instanceof AssignExpr && $expr->operator === '=') {
+                    $params[] = $expr->name;
+                    $defaults[] = $expr->value;
+                } else {
                     throw new ParserException('Arrow function parameters must be identifiers', $this->current);
                 }
-                $params[] = $expr->name;
             }
-            return new FunctionExpr(null, $params, $this->parseArrowBody(), isArrow: true, restParam: $restParam);
+            $hasDefaults = array_filter($defaults, fn($d) => $d !== null);
+            return new FunctionExpr(null, $params, $this->parseArrowBody(), isArrow: true, restParam: $restParam, defaults: $hasDefaults ? $defaults : []);
         }
 
         // No arrow — plain grouping (must be single expression)
@@ -810,9 +817,9 @@ final class Parser
         if ($this->current->type === TokenType::Identifier) {
             $name = $this->advance()->value;
         }
-        [$params, $restParam] = $this->parseParamList();
+        [$params, $restParam, $defaults] = $this->parseParamList();
         $body   = $this->parseBlockBody();
-        return new FunctionExpr($name, $params, $body, restParam: $restParam);
+        return new FunctionExpr($name, $params, $body, restParam: $restParam, defaults: $defaults);
     }
 
     private function parseThis(): ThisExpr
@@ -917,6 +924,7 @@ final class Parser
     {
         $this->expect(TokenType::LeftParen);
         $params = [];
+        $defaults = [];
         $restParam = null;
         if ($this->current->type !== TokenType::RightParen) {
             if ($this->current->type === TokenType::Spread) {
@@ -924,6 +932,7 @@ final class Parser
                 $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
             } else {
                 $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
+                $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
                 while ($this->match(TokenType::Comma)) {
                     if ($this->current->type === TokenType::Spread) {
                         $this->advance();
@@ -931,11 +940,14 @@ final class Parser
                         break;
                     }
                     $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
+                    $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
                 }
             }
         }
         $this->expect(TokenType::RightParen);
-        return [$params, $restParam];
+        // Only include defaults array if any defaults were provided
+        $hasDefaults = array_filter($defaults, fn($d) => $d !== null);
+        return [$params, $restParam, $hasDefaults ? $defaults : []];
     }
 
     // ──────────────────── Binding Powers ────────────────────
