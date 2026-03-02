@@ -13,6 +13,7 @@ final readonly class FunctionExpr implements Expr
      * @param string[]  $params
      * @param Stmt[]    $body
      * @param array<int, ?Expr> $defaults  Default value expressions, indexed same as $params
+     * @param array<int, array{isArray: bool, bindings: array, restName: ?string}> $paramDestructures
      */
     public function __construct(
         public ?string $name,
@@ -21,5 +22,6 @@ final readonly class FunctionExpr implements Expr
         public bool    $isArrow = false,
         public ?string $restParam = null,
         public array   $defaults = [],
+        public array   $paramDestructures = [],
     ) {}
 }

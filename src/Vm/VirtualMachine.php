@@ -1327,7 +1327,9 @@ final class VirtualMachine
             if ($key === 'length') {
                 $this->push(mb_strlen($obj));
             } else {
-                $this->push($this->getStringMethod($obj, (string) $key));
+                $vm = $this;
+                $invoker = static fn(mixed $fn, array $a): mixed => $vm->invokeFunction($fn, $a);
+                $this->push($this->getStringMethod($obj, (string) $key, $invoker));
             }
         } elseif (is_int($obj) || is_float($obj)) {
             $this->push($this->getNumberMethod($obj, (string) $key));
@@ -1336,7 +1338,7 @@ final class VirtualMachine
         }
     }
 
-    private function getStringMethod(string $str, string $name): mixed
+    private function getStringMethod(string $str, string $name, ?\Closure $invoker = null): mixed
     {
         return match ($name) {
             'charAt' => new NativeFunction('charAt', function (mixed $index = 0) use ($str) {
@@ -1427,9 +1429,16 @@ final class VirtualMachine
                 }
                 return new JsArray($parts);
             }),
-            'replace' => new NativeFunction('replace', function (mixed $search, mixed $replacement) use ($str) {
+            'replace' => new NativeFunction('replace', function (mixed $search, mixed $replacement) use ($str, $invoker) {
+                $isCallback = $replacement instanceof JsClosure || $replacement instanceof NativeFunction || is_callable($replacement);
                 if ($search instanceof JsRegex) {
                     $pcre = $search->toPcre();
+                    if ($isCallback && $invoker !== null) {
+                        $limit = $search->isGlobal() ? -1 : 1;
+                        return preg_replace_callback($pcre, function (array $m) use ($replacement, $invoker) {
+                            return (string) $invoker($replacement, $m);
+                        }, $str, $limit) ?? $str;
+                    }
                     $r = (string) $replacement;
                     if ($search->isGlobal()) {
                         return preg_replace($pcre, $r, $str) ?? $str;
@@ -1437,6 +1446,14 @@ final class VirtualMachine
                     return preg_replace($pcre, $r, $str, 1) ?? $str;
                 }
                 $s = (string) $search;
+                if ($isCallback && $invoker !== null) {
+                    $pos = mb_strpos($str, $s);
+                    if ($pos === false) {
+                        return $str;
+                    }
+                    $r = (string) $invoker($replacement, [$s, $pos, $str]);
+                    return mb_substr($str, 0, $pos) . $r . mb_substr($str, $pos + mb_strlen($s));
+                }
                 $r = (string) $replacement;
                 $pos = mb_strpos($str, $s);
                 if ($pos === false) {

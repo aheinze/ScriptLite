@@ -3,7 +3,7 @@
 An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subset of ES2015+ — enough for algorithms, data processing, closures, constructors, regex, and more.
 
 Two execution backends:
-- **Bytecode VM** — a stack-based virtual machine with 57 opcodes and register file optimization
+- **Bytecode VM** — a stack-based virtual machine with 62 opcodes and register file optimization
 - **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the VM)
 
 ## Quick start
@@ -38,13 +38,13 @@ $result = $engine->evalTranspiled($php);
 
 **Operators:** arithmetic (`+` `-` `*` `/` `%` `**`), increment/decrement (`++` `--`, prefix and postfix), comparison (`==` `!=` `===` `!==` `<` `<=` `>` `>=`), logical (`&&` `||` `!`), bitwise (`&` `|` `^` `~` `<<` `>>` `>>>`), nullish coalescing (`??`), ternary (`? :`), optional chaining (`?.`, `?.[]`, `?.()`), typeof, void, delete, in, instanceof, assignment (`=` `+=` `-=` `*=` `/=` `%=` `**=` `??=` `&=` `|=` `^=` `<<=` `>>=` `>>>=`)
 
-**Control flow:** `if`/`else`, `while`, `for`, `for...of`, `for...in`, `do...while`, `switch`/`case`/`default`, `break`, `continue`, `return`
+**Control flow:** `if`/`else`, `while`, `for` (including multi-var init: `for (let i = 0, j = 10; ...)`), `for...of`, `for...in`, `do...while`, `switch`/`case`/`default`, `break`, `continue`, `return`, comma operator in for-updates
 
-**Error handling:** `try`/`catch`, `throw`
+**Error handling:** `try`/`catch`/`finally`, `throw`, optional catch binding (`catch { }`)
 
-**Variables:** `var` (function-scoped, hoisted), `let` (block-scoped), `const` (block-scoped, immutable), array destructuring (`var [a, b, ...rest] = arr`), object destructuring (`var {name, age: a} = obj`) with defaults
+**Variables:** `var` (function-scoped, hoisted), `let` (block-scoped), `const` (block-scoped, immutable), array destructuring (`var [a, b, ...rest] = arr`), object destructuring (`var {name, age: a} = obj`) with defaults, nested destructuring (`var {user: {name, age}} = obj`, `var [a, [b, c]] = arr`), destructuring in function parameters (`function f({x, y}) {}`)
 
-**Functions:** declarations, expressions, arrow functions (`=>` with expression and block bodies), closures with lexical scoping, recursion, `new` / constructors / `this`, rest parameters, spread syntax, default parameters
+**Functions:** declarations, expressions, arrow functions (`=>` with expression and block bodies), closures with lexical scoping, recursion, `new` / constructors / `this`, rest parameters, spread syntax, default parameters, destructuring parameters with nesting and defaults
 
 **Object literals:** shorthand properties (`{x, y}`), computed property names (`{[expr]: value}`)
 
@@ -64,9 +64,9 @@ $result = $engine->evalTranspiled($php);
 
 **Number methods:** `toFixed`, `toPrecision`, `toExponential`, `toString` (with radix)
 
-**Array methods:** `push`, `pop`, `shift`, `unshift`, `map`, `filter`, `reduce`, `forEach`, `every`, `some`, `find`, `findIndex`, `findLast`, `findLastIndex`, `indexOf`, `includes`, `join`, `concat`, `slice`, `splice`, `sort`, `reverse`, `flat`, `flatMap`, `fill`, `at`
+**Array methods:** `push`, `pop`, `shift`, `unshift`, `map`, `filter`, `reduce`, `reduceRight`, `forEach`, `every`, `some`, `find`, `findIndex`, `findLast`, `findLastIndex`, `indexOf`, `includes`, `join`, `concat`, `slice`, `splice`, `sort`, `reverse`, `flat`, `flatMap`, `fill`, `at`
 
-**String methods:** `split`, `toUpperCase`, `toLowerCase`, `trim`, `trimStart`, `trimEnd`, `charAt`, `substring`, `startsWith`, `endsWith`, `repeat`, `replace`, `replaceAll`, `match`, `matchAll`, `search`, `indexOf`, `includes`, `slice`, `padStart`, `padEnd`, `at`
+**String methods:** `split`, `toUpperCase`, `toLowerCase`, `trim`, `trimStart`, `trimEnd`, `charAt`, `substring`, `startsWith`, `endsWith`, `repeat`, `replace` (with string or callback), `replaceAll`, `match`, `matchAll`, `search`, `indexOf`, `includes`, `slice`, `padStart`, `padEnd`, `at`
 
 **Object methods:** `hasOwnProperty`, `Object.keys`, `Object.values`, `Object.entries`, `Object.assign`, `Object.is`, `Object.create`, `Object.freeze`
 
@@ -204,7 +204,7 @@ ECMAScript source
 
 ### VM opcodes
 
-The VM uses 57 int-backed enum opcodes organized by category: stack ops, arithmetic, comparison, bitwise, variables (including register-optimized `GetReg`/`SetReg`), control flow, functions, exception handling, scope, and property access. The `match()` on int-backed enums compiles to a jump table under OPcache/JIT.
+The VM uses 62 int-backed enum opcodes organized by category: stack ops, arithmetic, comparison, bitwise, variables (including register-optimized `GetReg`/`SetReg`), control flow, functions, exception handling, scope, and property access. The `match()` on int-backed enums compiles to a jump table under OPcache/JIT.
 
 Non-captured local variables (`var` declarations and parameters) are allocated to an integer-indexed register file at compile time, bypassing the Environment hash table for ~13x faster variable access on hot paths. Variables captured by inner closures remain in the Environment scope chain to preserve correct closure semantics.
 
@@ -223,7 +223,7 @@ The transpiler maps ECMAScript constructs directly to PHP equivalents:
 php vendor/bin/phpunit tests/
 ```
 
-721 PHPUnit tests (1622 assertions) across 30 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring, do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, optional chaining, regex, scoping, string methods, switch, template literals, try/catch, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), fuzzing, and edge cases.
+783 PHPUnit tests (1747 assertions) across 34 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring (including nested and function params), do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, optional chaining, regex, scoping, string methods (including replace with callbacks), switch, template literals, try/catch/finally, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), comma operator, reduceRight, fuzzing, and edge cases.
 
 ## Benchmark
 

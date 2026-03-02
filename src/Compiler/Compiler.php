@@ -10,9 +10,9 @@ use ScriptLite\Ast\{
     ExpressionStmt, Expr, ForInStmt, ForOfStmt, ForStmt,
     FunctionDeclaration, FunctionExpr,
     Identifier, IfStmt, LogicalExpr, MemberAssignExpr, MemberExpr, NewExpr, NullLiteral, NumberLiteral,
-    ObjectLiteral, Program, RegexLiteral, ReturnStmt, SpreadElement, Stmt, StringLiteral, SwitchStmt,
+    ObjectLiteral, Program, RegexLiteral, ReturnStmt, SequenceExpr, SpreadElement, Stmt, StringLiteral, SwitchStmt,
     TemplateLiteral, ThisExpr,
-    ThrowStmt, TryCatchStmt, TypeofExpr, UnaryExpr, UndefinedLiteral, UpdateExpr, VoidExpr,
+    ThrowStmt, TryCatchStmt, TypeofExpr, UnaryExpr, UndefinedLiteral, UpdateExpr, VarDeclarationList, VoidExpr,
     VarDeclaration, VarKind, WhileStmt
 };
 use ScriptLite\Runtime\JsRegex;
@@ -69,6 +69,9 @@ final class Compiler
 
     /** @var array<array{continuePatches: int[], breakPatches: int[]}> */
     private array $loopStack = [];
+
+    /** @var array<array{type: string, compile?: \Closure}> Stack tracking loops and finally blocks for break/continue */
+    private array $controlFlowStack = [];
 
     public function compile(Program $program): CompiledScript
     {
@@ -134,6 +137,7 @@ final class Compiler
             $stmt instanceof ForOfStmt => $this->compileForOf($stmt),
             $stmt instanceof ForInStmt => $this->compileForIn($stmt),
             $stmt instanceof DestructuringDeclaration => $this->compileDestructuring($stmt),
+            $stmt instanceof VarDeclarationList => $this->compileVarDeclarationList($stmt),
             $stmt instanceof BreakStmt => $this->compileBreak(),
             $stmt instanceof ContinueStmt => $this->compileContinue(),
             $stmt instanceof DoWhileStmt => $this->compileDoWhile($stmt),
@@ -171,9 +175,16 @@ final class Compiler
         }
     }
 
+    private function compileVarDeclarationList(VarDeclarationList $list): void
+    {
+        foreach ($list->declarations as $decl) {
+            $this->compileVarDeclaration($decl);
+        }
+    }
+
     private function compileFunctionDeclarationHoist(FunctionDeclaration $decl): void
     {
-        $descriptor = $this->compileFunction($decl->name, $decl->params, $decl->body, $decl->restParam, $decl->defaults);
+        $descriptor = $this->compileFunction($decl->name, $decl->params, $decl->body, $decl->restParam, $decl->defaults, $decl->paramDestructures);
         $descIdx    = $this->addConstant($descriptor);
 
         $this->emit(OpCode::MakeClosure, $descIdx);
@@ -249,7 +260,7 @@ final class Compiler
     private function compileWhile(WhileStmt $stmt): void
     {
         $loopStart = count($this->ops);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         $this->compileExpr($stmt->condition);
         $exitJump = $this->emitJump(OpCode::JumpIfFalse);
@@ -266,9 +277,11 @@ final class Compiler
 
     private function compileFor(ForStmt $stmt): void
     {
-        $needsScope = $stmt->init instanceof VarDeclaration
+        $needsScope = ($stmt->init instanceof VarDeclaration
             && $stmt->init->kind !== VarKind::Var
-            && !isset($this->regMap[$stmt->init->name]);
+            && !isset($this->regMap[$stmt->init->name]))
+            || ($stmt->init instanceof VarDeclarationList
+            && $stmt->init->declarations[0]->kind !== VarKind::Var);
 
         if ($needsScope) {
             $this->emit(OpCode::PushScope);
@@ -277,13 +290,17 @@ final class Compiler
         // Init
         if ($stmt->init instanceof VarDeclaration) {
             $this->compileVarDeclaration($stmt->init);
+        } elseif ($stmt->init instanceof VarDeclarationList) {
+            $this->compileVarDeclarationList($stmt->init);
+        } elseif ($stmt->init instanceof DestructuringDeclaration) {
+            $this->compileDestructuring($stmt->init);
         } elseif ($stmt->init instanceof ExpressionStmt) {
             $this->compileExpr($stmt->init->expression);
             $this->emit(OpCode::Pop);
         }
 
         $loopStart = count($this->ops);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         // Condition
         $exitJump = -1;
@@ -344,7 +361,7 @@ final class Compiler
 
         // Loop start
         $loopStart = count($this->ops);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         // Condition: __forof_idx < __forof_arr.length
         $this->emit(OpCode::GetLocal, $idxName);
@@ -419,7 +436,7 @@ final class Compiler
 
         // Loop start
         $loopStart = count($this->ops);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         // Condition: __forin_idx < __forin_arr.length
         $this->emit(OpCode::GetLocal, $idxName);
@@ -473,14 +490,19 @@ final class Compiler
         $tmpName = $this->addName("__destr_tmp{$uid}");
         $this->emit(OpCode::DefineVar, $tmpName, 0);
 
-        // Extract each binding
-        foreach ($decl->bindings as $binding) {
-            $this->emit(OpCode::GetLocal, $tmpName);
-            if ($decl->isArray) {
-                // Array: access by index
+        $kindVal = match ($decl->kind) {
+            VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
+        };
+        $this->compileDestructuringPattern($tmpName, $decl->isArray, $decl->bindings, $decl->restName, $kindVal);
+    }
+
+    private function compileDestructuringPattern(int $srcName, bool $isArray, array $bindings, ?string $restName, int $kindVal): void
+    {
+        foreach ($bindings as $binding) {
+            $this->emit(OpCode::GetLocal, $srcName);
+            if ($isArray) {
                 $this->emit(OpCode::Const, $this->addConstant((float) $binding['source']));
             } else {
-                // Object: access by key
                 $this->emit(OpCode::Const, $this->addConstant($binding['source']));
             }
             $this->emit(OpCode::GetProperty);
@@ -491,9 +513,19 @@ final class Compiler
                 $this->emit(OpCode::Const, $this->addConstant(JsUndefined::Value));
                 $this->emit(OpCode::StrictEq);
                 $skipDefault = $this->emitJump(OpCode::JumpIfFalse);
-                $this->emit(OpCode::Pop); // discard undefined
+                $this->emit(OpCode::Pop);
                 $this->compileExpr($binding['default']);
                 $this->patchJump($skipDefault);
+            }
+
+            // Nested pattern: store in temp and recurse
+            if ($binding['name'] === null && isset($binding['nested'])) {
+                $uid = $this->tempCounter++;
+                $nestedTmp = $this->addName("__destr_tmp{$uid}");
+                $this->emit(OpCode::DefineVar, $nestedTmp, 0);
+                $n = $binding['nested'];
+                $this->compileDestructuringPattern($nestedTmp, $n['isArray'], $n['bindings'], $n['restName'], $kindVal);
+                continue;
             }
 
             // Store in variable
@@ -501,37 +533,49 @@ final class Compiler
                 $this->emit(OpCode::SetReg, $this->regMap[$binding['name']]);
             } else {
                 $nameIdx = $this->addName($binding['name']);
-                $kindVal = match ($decl->kind) {
-                    VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
-                };
                 $this->emit(OpCode::DefineVar, $nameIdx, $kindVal);
             }
         }
 
         // Handle rest element
-        if ($decl->restName !== null && $decl->isArray) {
-            // rest = arr.slice(bindingCount)
-            $this->emit(OpCode::GetLocal, $tmpName);
+        if ($restName !== null && $isArray) {
+            $this->emit(OpCode::GetLocal, $srcName);
             $this->emit(OpCode::Const, $this->addConstant('slice'));
             $this->emit(OpCode::GetProperty);
-            $this->emit(OpCode::Const, $this->addConstant((float) count($decl->bindings)));
+            $this->emit(OpCode::Const, $this->addConstant((float) count($bindings)));
             $this->emit(OpCode::Call, 1);
-            if (isset($this->regMap[$decl->restName])) {
-                $this->emit(OpCode::SetReg, $this->regMap[$decl->restName]);
+            if (isset($this->regMap[$restName])) {
+                $this->emit(OpCode::SetReg, $this->regMap[$restName]);
             } else {
-                $nameIdx = $this->addName($decl->restName);
-                $kindVal = match ($decl->kind) {
-                    VarKind::Var => 0, VarKind::Let => 1, VarKind::Const => 2,
-                };
+                $nameIdx = $this->addName($restName);
                 $this->emit(OpCode::DefineVar, $nameIdx, $kindVal);
             }
         }
     }
 
+    /**
+     * Emit destructuring for a function parameter pattern: function f({x, y}) { ... }
+     * The param value is already in the register/environment under $paramName.
+     */
+    private function compileParamDestructuring(string $paramName, array $pattern): void
+    {
+        // Store param value in a temp variable so we can reuse compileDestructuringPattern
+        $uid = $this->tempCounter++;
+        if (isset($this->regMap[$paramName])) {
+            $this->emit(OpCode::GetReg, $this->regMap[$paramName]);
+        } else {
+            $this->emit(OpCode::GetLocal, $this->addName($paramName));
+        }
+        $tmpName = $this->addName("__destr_tmp{$uid}");
+        $this->emit(OpCode::DefineVar, $tmpName, 0);
+
+        $this->compileDestructuringPattern($tmpName, $pattern['isArray'], $pattern['bindings'], $pattern['restName'], 0);
+    }
+
     private function compileDoWhile(DoWhileStmt $stmt): void
     {
         $bodyStart = count($this->ops);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         $this->compileStmt($stmt->body);
 
@@ -550,6 +594,7 @@ final class Compiler
         if (empty($this->loopStack)) {
             throw new RuntimeException('break outside of loop or switch');
         }
+        $this->emitPendingFinally();
         $this->loopStack[count($this->loopStack) - 1]['breakPatches'][] = $this->emitJump(OpCode::Jump);
     }
 
@@ -558,14 +603,31 @@ final class Compiler
         if (empty($this->loopStack)) {
             throw new RuntimeException('continue outside of loop');
         }
+        $this->emitPendingFinally();
         $this->loopStack[count($this->loopStack) - 1]['continuePatches'][] = $this->emitJump(OpCode::Jump);
+    }
+
+    /**
+     * Emit PopCatch + finally bodies for all try/finally blocks between here and the enclosing loop.
+     */
+    private function emitPendingFinally(): void
+    {
+        for ($i = count($this->controlFlowStack) - 1; $i >= 0; $i--) {
+            $entry = $this->controlFlowStack[$i];
+            if ($entry['type'] === 'loop') {
+                break;
+            }
+            // It's a finally entry — need to PopCatch and run the finally body
+            $this->emit(OpCode::PopCatch);
+            ($entry['compile'])();
+        }
     }
 
     private function compileSwitch(SwitchStmt $stmt): void
     {
         // Compile discriminant — stays on stack throughout
         $this->compileExpr($stmt->discriminant);
-        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->pushLoop();
 
         // Phase 1: Jump table — emit comparisons for each case
         $caseJumps = [];
@@ -622,9 +684,16 @@ final class Compiler
     }
 
     /** Patch all break jumps in the current loop to the current IP, then pop the stack. */
+    private function pushLoop(): void
+    {
+        $this->loopStack[] = ['continuePatches' => [], 'breakPatches' => []];
+        $this->controlFlowStack[] = ['type' => 'loop'];
+    }
+
     private function patchBreaks(): void
     {
         $loop = array_pop($this->loopStack);
+        array_pop($this->controlFlowStack);
         $target = count($this->ops);
         foreach ($loop['breakPatches'] as $idx) {
             $this->opA[$idx] = $target;
@@ -639,37 +708,89 @@ final class Compiler
 
     private function compileTryCatch(TryCatchStmt $stmt): void
     {
-        // SetCatch with placeholder for catch handler IP
+        $compileFinalizer = function () use ($stmt): void {
+            if ($stmt->finalizer !== null) {
+                foreach ($stmt->finalizer->statements as $s) {
+                    $this->compileStmt($s);
+                }
+            }
+        };
+
+        // SetCatch with placeholder for exception handler IP
         $setCatchIdx = $this->emit(OpCode::SetCatch, 0xFFFF);
+
+        // Push finally entry so break/continue can find it
+        if ($stmt->finalizer !== null) {
+            $this->controlFlowStack[] = ['type' => 'finally', 'compile' => $compileFinalizer];
+        }
 
         // Compile try body
         foreach ($stmt->block->statements as $s) {
             $this->compileStmt($s);
         }
 
-        // Remove handler on normal completion
-        $this->emit(OpCode::PopCatch);
-        $skipCatch = $this->emitJump(OpCode::Jump);
+        // Pop the finally entry (try body is done)
+        if ($stmt->finalizer !== null) {
+            array_pop($this->controlFlowStack);
+        }
 
-        // Catch handler starts here — patch SetCatch to point here
+        // Normal try completion: remove handler, run finally, jump past exception handlers
+        $this->emit(OpCode::PopCatch);
+        $compileFinalizer();
+        $jumpToEnd = [$this->emitJump(OpCode::Jump)];
+
+        // Exception handler starts here — patch SetCatch to point here
         $this->opA[$setCatchIdx] = count($this->ops);
 
         if ($stmt->handler !== null) {
-            // Catch param is block-scoped
-            $this->emit(OpCode::PushScope);
-            $nameIdx = $this->addName($stmt->handler->param);
-            $this->emit(OpCode::DefineVar, $nameIdx, 1); // 1 = let — pops exception value from stack
-
-            foreach ($stmt->handler->body->statements as $s) {
-                $this->compileStmt($s);
+            // Has catch clause — if also has finally, wrap catch body with inner handler
+            $innerCatchIdx = null;
+            if ($stmt->finalizer !== null) {
+                $innerCatchIdx = $this->emit(OpCode::SetCatch, 0xFFFF);
             }
-            $this->emit(OpCode::PopScope);
+
+            if ($stmt->handler->param !== null) {
+                // Catch param is block-scoped
+                $this->emit(OpCode::PushScope);
+                $nameIdx = $this->addName($stmt->handler->param);
+                $this->emit(OpCode::DefineVar, $nameIdx, 1); // 1 = let — pops exception value from stack
+
+                foreach ($stmt->handler->body->statements as $s) {
+                    $this->compileStmt($s);
+                }
+                $this->emit(OpCode::PopScope);
+            } else {
+                // Optional catch binding: catch { } — discard exception, run body
+                $this->emit(OpCode::Pop);
+                foreach ($stmt->handler->body->statements as $s) {
+                    $this->compileStmt($s);
+                }
+            }
+
+            if ($innerCatchIdx !== null) {
+                $this->emit(OpCode::PopCatch);
+            }
+
+            // Normal catch exit: run finally, jump to end
+            $compileFinalizer();
+            $jumpToEnd[] = $this->emitJump(OpCode::Jump);
+
+            if ($innerCatchIdx !== null) {
+                // Exception in catch body: run finally, then re-throw
+                $this->opA[$innerCatchIdx] = count($this->ops);
+                $compileFinalizer();
+                $this->emit(OpCode::Throw);
+            }
         } else {
-            // No catch clause — just discard the exception value from stack
-            $this->emit(OpCode::Pop);
+            // No catch clause (try/finally): run finally, then re-throw
+            $compileFinalizer();
+            $this->emit(OpCode::Throw);
         }
 
-        $this->patchJump($skipCatch);
+        // Patch all jumps to end
+        foreach ($jumpToEnd as $j) {
+            $this->patchJump($j);
+        }
     }
 
     // ──────────────────── Expression compilation ────────────────────
@@ -702,6 +823,7 @@ final class Compiler
             $expr instanceof UpdateExpr => $this->compileUpdate($expr),
             $expr instanceof VoidExpr => $this->compileVoid($expr),
             $expr instanceof DeleteExpr => $this->compileDelete($expr),
+            $expr instanceof SequenceExpr => $this->compileSequence($expr),
             default => throw new RuntimeException('Unknown expression type: ' . get_class($expr)),
         };
     }
@@ -1013,6 +1135,17 @@ final class Compiler
         }
     }
 
+    private function compileSequence(SequenceExpr $expr): void
+    {
+        // Evaluate all expressions, pop all but the last
+        for ($i = 0; $i < count($expr->expressions); $i++) {
+            $this->compileExpr($expr->expressions[$i]);
+            if ($i < count($expr->expressions) - 1) {
+                $this->emit(OpCode::Pop);
+            }
+        }
+    }
+
     private function compileAssign(AssignExpr $expr): void
     {
         $isReg = isset($this->regMap[$expr->name]);
@@ -1137,7 +1270,7 @@ final class Compiler
 
     private function compileFunctionExpr(FunctionExpr $expr): void
     {
-        $descriptor = $this->compileFunction($expr->name, $expr->params, $expr->body, $expr->restParam, $expr->defaults);
+        $descriptor = $this->compileFunction($expr->name, $expr->params, $expr->body, $expr->restParam, $expr->defaults, $expr->paramDestructures);
         $descIdx    = $this->addConstant($descriptor);
         $this->emit(OpCode::MakeClosure, $descIdx);
     }
@@ -1202,13 +1335,20 @@ final class Compiler
      * @param string[] $params
      * @param Stmt[]   $body
      */
-    private function compileFunction(?string $name, array $params, array $body, ?string $restParam = null, array $defaults = []): FunctionDescriptor
+    private function compileFunction(?string $name, array $params, array $body, ?string $restParam = null, array $defaults = [], array $paramDestructures = []): FunctionDescriptor
     {
         // Create a child compiler to get a fresh constant/name pool
         $child = new self();
 
+        // Collect additional locals from param destructuring patterns
+        $extraLocalsMap = [];
+        foreach ($paramDestructures as $pattern) {
+            self::collectBindingNames($pattern['bindings'], $pattern['restName'], $extraLocalsMap);
+        }
+        $extraLocals = array_keys($extraLocalsMap);
+
         // Analyze locals for register allocation
-        $child->analyzeLocals($params, $body, $restParam);
+        $child->analyzeLocals($params, $body, $restParam, $extraLocals);
 
         // Emit default parameter assignments:
         // if (param === undefined) param = defaultExpr;
@@ -1236,6 +1376,12 @@ final class Compiler
             }
             $child->emit(OpCode::Pop); // discard the set result
             $child->patchJump($jumpIfDefined);
+        }
+
+        // Emit destructuring for pattern parameters: function f({x, y}) { ... }
+        foreach ($paramDestructures as $paramIdx => $pattern) {
+            $paramName = $params[$paramIdx];
+            $child->compileParamDestructuring($paramName, $pattern);
         }
 
         // Hoist function declarations
@@ -1293,7 +1439,7 @@ final class Compiler
      * @param string[] $params
      * @param Stmt[]   $body
      */
-    private function analyzeLocals(array $params, array $body, ?string $restParam = null): void
+    private function analyzeLocals(array $params, array $body, ?string $restParam = null, array $extraLocals = []): void
     {
         $this->regMap = [];
         $this->regCount = 0;
@@ -1305,6 +1451,9 @@ final class Compiler
         }
         if ($restParam !== null) {
             $locals[$restParam] = true;
+        }
+        foreach ($extraLocals as $name) {
+            $locals[$name] = true;
         }
         self::collectDeclarations($body, $locals);
 
@@ -1353,9 +1502,21 @@ final class Compiler
                 }
             } elseif ($stmt instanceof WhileStmt) {
                 self::collectDeclarations([$stmt->body], $locals);
+            } elseif ($stmt instanceof VarDeclarationList) {
+                foreach ($stmt->declarations as $d) {
+                    if ($d->kind === VarKind::Var) {
+                        $locals[$d->name] = true;
+                    }
+                }
             } elseif ($stmt instanceof ForStmt) {
                 if ($stmt->init instanceof VarDeclaration && $stmt->init->kind === VarKind::Var) {
                     $locals[$stmt->init->name] = true;
+                } elseif ($stmt->init instanceof VarDeclarationList) {
+                    foreach ($stmt->init->declarations as $d) {
+                        if ($d->kind === VarKind::Var) {
+                            $locals[$d->name] = true;
+                        }
+                    }
                 }
                 self::collectDeclarations([$stmt->body], $locals);
             } elseif ($stmt instanceof ForOfStmt) {
@@ -1369,12 +1530,8 @@ final class Compiler
                 }
                 self::collectDeclarations([$stmt->body], $locals);
             } elseif ($stmt instanceof DestructuringDeclaration && $stmt->kind === VarKind::Var) {
-                foreach ($stmt->bindings as $b) {
-                    $locals[$b['name']] = true;
-                }
-                if ($stmt->restName !== null) {
-                    $locals[$stmt->restName] = true;
-                }
+                self::collectBindingNames($stmt->bindings, $stmt->restName, $locals);
+
             } elseif ($stmt instanceof DoWhileStmt) {
                 self::collectDeclarations([$stmt->body], $locals);
             } elseif ($stmt instanceof SwitchStmt) {
@@ -1386,7 +1543,24 @@ final class Compiler
                 if ($stmt->handler !== null) {
                     self::collectDeclarations([$stmt->handler->body], $locals);
                 }
+                if ($stmt->finalizer !== null) {
+                    self::collectDeclarations($stmt->finalizer->statements, $locals);
+                }
             }
+        }
+    }
+
+    private static function collectBindingNames(array $bindings, ?string $restName, array &$locals): void
+    {
+        foreach ($bindings as $b) {
+            if ($b['name'] === null && isset($b['nested'])) {
+                self::collectBindingNames($b['nested']['bindings'], $b['nested']['restName'], $locals);
+            } else {
+                $locals[$b['name']] = true;
+            }
+        }
+        if ($restName !== null) {
+            $locals[$restName] = true;
         }
     }
 

@@ -235,4 +235,193 @@ class TryCatchTest extends ScriptLiteTestCase
         $this->expectException(\RuntimeException::class);
         $this->engine->eval('throw "uncaught"');
     }
+
+    // ═══════════════════ try...finally ═══════════════════
+
+    public function testTryFinallyNoThrow(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                result = "try";
+            } finally {
+                result = result + " finally";
+            }
+            result
+        ', 'try finally');
+    }
+
+    public function testTryFinallyWithThrow(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                try {
+                    throw "boom";
+                } finally {
+                    result = "finally ran";
+                }
+            } catch (e) {}
+            result
+        ', 'finally ran');
+    }
+
+    public function testTryFinallyRethrows(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                try {
+                    throw "error";
+                } finally {
+                    result = "finally";
+                }
+            } catch (e) {
+                result = result + " caught:" + e;
+            }
+            result
+        ', 'finally caught:error');
+    }
+
+    public function testTryCatchFinally(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                throw "err";
+            } catch (e) {
+                result = "caught:" + e;
+            } finally {
+                result = result + " finally";
+            }
+            result
+        ', 'caught:err finally');
+    }
+
+    public function testTryCatchFinallyNoThrow(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                result = "try";
+            } catch (e) {
+                result = "caught";
+            } finally {
+                result = result + " finally";
+            }
+            result
+        ', 'try finally');
+    }
+
+    public function testFinallyRunsWhenCatchThrows(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                try {
+                    throw "first";
+                } catch (e) {
+                    throw "second";
+                } finally {
+                    result = "finally";
+                }
+            } catch (e) {
+                result = result + " caught:" + e;
+            }
+            result
+        ', 'finally caught:second');
+    }
+
+    public function testFinallyReturnValue(): void
+    {
+        $this->assertBothBackends('
+            var x = 0;
+            try {
+                x = 1;
+            } finally {
+                x = x + 10;
+            }
+            x
+        ', 11);
+    }
+
+    public function testNestedTryFinally(): void
+    {
+        $this->assertBothBackends('
+            var log = "";
+            try {
+                try {
+                    throw "err";
+                } finally {
+                    log = log + "inner ";
+                }
+            } catch (e) {
+                log = log + "caught ";
+            } finally {
+                log = log + "outer";
+            }
+            log
+        ', 'inner caught outer');
+    }
+
+    public function testFinallyWithFunctionThrow(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            function boom() { throw "from fn"; }
+            try {
+                try {
+                    boom();
+                } finally {
+                    result = "finally";
+                }
+            } catch (e) {
+                result = result + " caught:" + e;
+            }
+            result
+        ', 'finally caught:from fn');
+    }
+
+    // ═══════════════════ Optional catch binding ═══════════════════
+
+    public function testOptionalCatchBinding(): void
+    {
+        $this->assertBothBackends('
+            var result = "none";
+            try {
+                throw "err";
+            } catch {
+                result = "caught";
+            }
+            result
+        ', 'caught');
+    }
+
+    public function testOptionalCatchBindingNoThrow(): void
+    {
+        $this->assertBothBackends('
+            var result = "try";
+            try {
+                result = "ok";
+            } catch {
+                result = "caught";
+            }
+            result
+        ', 'ok');
+    }
+
+    public function testOptionalCatchBindingWithFinally(): void
+    {
+        $this->assertBothBackends('
+            var result = "";
+            try {
+                throw "err";
+            } catch {
+                result = "caught";
+            } finally {
+                result = result + " finally";
+            }
+            result
+        ', 'caught finally');
+    }
 }

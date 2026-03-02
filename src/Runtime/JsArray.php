@@ -266,6 +266,21 @@ final class JsArray
                 }
                 return $acc;
             }) : null,
+            'reduceRight' => $invoker !== null ? new NativeFunction('reduceRight', function (mixed $fn, mixed $initial = null) use ($invoker) {
+                $acc = $initial;
+                $startIdx = count($this->elements) - 1;
+                if ($acc === null || $acc === JsUndefined::Value) {
+                    if (empty($this->elements)) {
+                        throw new \RuntimeException('TypeError: Reduce of empty array with no initial value');
+                    }
+                    $acc = $this->elements[$startIdx];
+                    $startIdx--;
+                }
+                for ($i = $startIdx; $i >= 0; $i--) {
+                    $acc = $invoker($fn, [$acc, $this->elements[$i], $i]);
+                }
+                return $acc;
+            }) : null,
             'every' => $invoker !== null ? new NativeFunction('every', function (mixed $fn) use ($invoker) {
                 foreach ($this->elements as $i => $el) {
                     if (!$invoker($fn, [$el, $i])) {

@@ -91,7 +91,18 @@ final class Parser
         };
     }
 
-    private function parseVarDeclaration(): VarDeclaration|DestructuringDeclaration
+    private function parseVarDeclaration(): VarDeclaration|DestructuringDeclaration|VarDeclarationList
+    {
+        $result = $this->parseVarDeclarationInner();
+        $this->consumeSemicolon();
+        return $result;
+    }
+
+    /**
+     * Parse var/let/const declaration(s) without consuming the trailing semicolon.
+     * Returns a single VarDeclaration, DestructuringDeclaration, or VarDeclarationList.
+     */
+    private function parseVarDeclarationInner(): VarDeclaration|DestructuringDeclaration|VarDeclarationList
     {
         $kind = match ($this->current->type) {
             TokenType::Var => VarKind::Var,
@@ -103,12 +114,12 @@ final class Parser
 
         // Array destructuring: let [a, b] = expr
         if ($this->current->type === TokenType::LeftBracket) {
-            return $this->parseArrayDestructuring($kind);
+            return $this->parseArrayDestructuring($kind, false);
         }
 
         // Object destructuring: let {a, b} = expr
         if ($this->current->type === TokenType::LeftBrace) {
-            return $this->parseObjectDestructuring($kind);
+            return $this->parseObjectDestructuring($kind, false);
         }
 
         $name = $this->expect(TokenType::Identifier, 'Expected variable name')->value;
@@ -116,12 +127,27 @@ final class Parser
         if ($this->match(TokenType::Equal)) {
             $init = $this->parseExpression();
         }
-        $this->consumeSemicolon();
+        $first = new VarDeclaration($kind, $name, $init);
 
-        return new VarDeclaration($kind, $name, $init);
+        // Check for comma-separated additional declarations: let a = 1, b = 2
+        if ($this->current->type !== TokenType::Comma) {
+            return $first;
+        }
+
+        $declarations = [$first];
+        while ($this->match(TokenType::Comma)) {
+            $name = $this->expect(TokenType::Identifier, 'Expected variable name')->value;
+            $init = null;
+            if ($this->match(TokenType::Equal)) {
+                $init = $this->parseExpression();
+            }
+            $declarations[] = new VarDeclaration($kind, $name, $init);
+        }
+
+        return new VarDeclarationList($declarations);
     }
 
-    private function parseArrayDestructuring(VarKind $kind): DestructuringDeclaration
+    private function parseArrayDestructuring(VarKind $kind, bool $consumeSemi = true): DestructuringDeclaration
     {
         $this->expect(TokenType::LeftBracket);
         $bindings = [];
@@ -143,6 +169,36 @@ final class Parser
                 break;
             }
 
+            // Nested array destructuring: [a, [b, c]]
+            if ($this->current->type === TokenType::LeftBracket) {
+                $nested = $this->parseNestedPattern(true);
+                $default = null;
+                if ($this->match(TokenType::Equal)) {
+                    $default = $this->parseExpression();
+                }
+                $bindings[] = ['name' => null, 'source' => $index, 'default' => $default, 'nested' => $nested];
+                $index++;
+                if (!$this->match(TokenType::Comma)) {
+                    break;
+                }
+                continue;
+            }
+
+            // Nested object destructuring: [a, {b, c}]
+            if ($this->current->type === TokenType::LeftBrace) {
+                $nested = $this->parseNestedPattern(false);
+                $default = null;
+                if ($this->match(TokenType::Equal)) {
+                    $default = $this->parseExpression();
+                }
+                $bindings[] = ['name' => null, 'source' => $index, 'default' => $default, 'nested' => $nested];
+                $index++;
+                if (!$this->match(TokenType::Comma)) {
+                    break;
+                }
+                continue;
+            }
+
             $name = $this->expect(TokenType::Identifier, 'Expected variable name in destructuring')->value;
             $default = null;
             if ($this->match(TokenType::Equal)) {
@@ -159,12 +215,14 @@ final class Parser
         $this->expect(TokenType::RightBracket);
         $this->expect(TokenType::Equal, 'Expected = after destructuring pattern');
         $initializer = $this->parseExpression();
-        $this->consumeSemicolon();
+        if ($consumeSemi) {
+            $this->consumeSemicolon();
+        }
 
         return new DestructuringDeclaration($kind, $bindings, $restName, $initializer, true);
     }
 
-    private function parseObjectDestructuring(VarKind $kind): DestructuringDeclaration
+    private function parseObjectDestructuring(VarKind $kind, bool $consumeSemi = true): DestructuringDeclaration
     {
         $this->expect(TokenType::LeftBrace);
         $bindings = [];
@@ -180,9 +238,35 @@ final class Parser
 
             $key = $this->expect(TokenType::Identifier, 'Expected property name in destructuring')->value;
 
-            // { key: localName } or { key } (shorthand)
+            // { key: localName } or { key: { nested } } or { key: [ nested ] } or { key } (shorthand)
             $localName = $key;
             if ($this->match(TokenType::Colon)) {
+                // Nested object destructuring: { key: { ... } }
+                if ($this->current->type === TokenType::LeftBrace) {
+                    $nested = $this->parseNestedPattern(false);
+                    $default = null;
+                    if ($this->match(TokenType::Equal)) {
+                        $default = $this->parseExpression();
+                    }
+                    $bindings[] = ['name' => null, 'source' => $key, 'default' => $default, 'nested' => $nested];
+                    if (!$this->match(TokenType::Comma)) {
+                        break;
+                    }
+                    continue;
+                }
+                // Nested array destructuring: { key: [ ... ] }
+                if ($this->current->type === TokenType::LeftBracket) {
+                    $nested = $this->parseNestedPattern(true);
+                    $default = null;
+                    if ($this->match(TokenType::Equal)) {
+                        $default = $this->parseExpression();
+                    }
+                    $bindings[] = ['name' => null, 'source' => $key, 'default' => $default, 'nested' => $nested];
+                    if (!$this->match(TokenType::Comma)) {
+                        break;
+                    }
+                    continue;
+                }
                 $localName = $this->expect(TokenType::Identifier, 'Expected variable name')->value;
             }
 
@@ -201,19 +285,126 @@ final class Parser
         $this->expect(TokenType::RightBrace);
         $this->expect(TokenType::Equal, 'Expected = after destructuring pattern');
         $initializer = $this->parseExpression();
-        $this->consumeSemicolon();
+        if ($consumeSemi) {
+            $this->consumeSemicolon();
+        }
 
         return new DestructuringDeclaration($kind, $bindings, $restName, $initializer, false);
+    }
+
+    /**
+     * Parse a nested destructuring pattern (consumed as part of a parent pattern).
+     * Returns ['isArray' => bool, 'bindings' => [...], 'restName' => ?string]
+     */
+    private function parseNestedPattern(bool $isArray): array
+    {
+        $bindings = [];
+        $restName = null;
+
+        if ($isArray) {
+            $this->expect(TokenType::LeftBracket);
+            $index = 0;
+            while ($this->current->type !== TokenType::RightBracket && $this->current->type !== TokenType::Eof) {
+                if ($this->current->type === TokenType::Comma) {
+                    $index++;
+                    $this->advance();
+                    continue;
+                }
+                if ($this->current->type === TokenType::Spread) {
+                    $this->advance();
+                    $restName = $this->expect(TokenType::Identifier, 'Expected rest element name')->value;
+                    break;
+                }
+                // Recursively nested array
+                if ($this->current->type === TokenType::LeftBracket) {
+                    $nested = $this->parseNestedPattern(true);
+                    $default = null;
+                    if ($this->match(TokenType::Equal)) {
+                        $default = $this->parseExpression();
+                    }
+                    $bindings[] = ['name' => null, 'source' => $index, 'default' => $default, 'nested' => $nested];
+                    $index++;
+                    if (!$this->match(TokenType::Comma)) { break; }
+                    continue;
+                }
+                // Recursively nested object
+                if ($this->current->type === TokenType::LeftBrace) {
+                    $nested = $this->parseNestedPattern(false);
+                    $default = null;
+                    if ($this->match(TokenType::Equal)) {
+                        $default = $this->parseExpression();
+                    }
+                    $bindings[] = ['name' => null, 'source' => $index, 'default' => $default, 'nested' => $nested];
+                    $index++;
+                    if (!$this->match(TokenType::Comma)) { break; }
+                    continue;
+                }
+                $name = $this->expect(TokenType::Identifier, 'Expected variable name in destructuring')->value;
+                $default = null;
+                if ($this->match(TokenType::Equal)) {
+                    $default = $this->parseExpression();
+                }
+                $bindings[] = ['name' => $name, 'source' => $index, 'default' => $default];
+                $index++;
+                if (!$this->match(TokenType::Comma)) { break; }
+            }
+            $this->expect(TokenType::RightBracket);
+        } else {
+            $this->expect(TokenType::LeftBrace);
+            while ($this->current->type !== TokenType::RightBrace && $this->current->type !== TokenType::Eof) {
+                if ($this->current->type === TokenType::Spread) {
+                    $this->advance();
+                    $restName = $this->expect(TokenType::Identifier, 'Expected rest element name')->value;
+                    break;
+                }
+                $key = $this->expect(TokenType::Identifier, 'Expected property name in destructuring')->value;
+                $localName = $key;
+                if ($this->match(TokenType::Colon)) {
+                    // Nested object: { key: { ... } }
+                    if ($this->current->type === TokenType::LeftBrace) {
+                        $nested = $this->parseNestedPattern(false);
+                        $default = null;
+                        if ($this->match(TokenType::Equal)) {
+                            $default = $this->parseExpression();
+                        }
+                        $bindings[] = ['name' => null, 'source' => $key, 'default' => $default, 'nested' => $nested];
+                        if (!$this->match(TokenType::Comma)) { break; }
+                        continue;
+                    }
+                    // Nested array: { key: [ ... ] }
+                    if ($this->current->type === TokenType::LeftBracket) {
+                        $nested = $this->parseNestedPattern(true);
+                        $default = null;
+                        if ($this->match(TokenType::Equal)) {
+                            $default = $this->parseExpression();
+                        }
+                        $bindings[] = ['name' => null, 'source' => $key, 'default' => $default, 'nested' => $nested];
+                        if (!$this->match(TokenType::Comma)) { break; }
+                        continue;
+                    }
+                    $localName = $this->expect(TokenType::Identifier, 'Expected variable name')->value;
+                }
+                $default = null;
+                if ($this->match(TokenType::Equal)) {
+                    $default = $this->parseExpression();
+                }
+                $bindings[] = ['name' => $localName, 'source' => $key, 'default' => $default];
+                if (!$this->match(TokenType::Comma)) { break; }
+            }
+            $this->expect(TokenType::RightBrace);
+        }
+
+        return ['isArray' => $isArray, 'bindings' => $bindings, 'restName' => $restName];
     }
 
     private function parseFunctionDeclaration(): FunctionDeclaration
     {
         $this->expect(TokenType::Function);
         $name   = $this->expect(TokenType::Identifier, 'Expected function name')->value;
-        [$params, $restParam, $defaults] = $this->parseParamList();
+        [$params, $restParam, $defaults, $paramDestructures] = $this->parseParamList();
         $body   = $this->parseBlockBody();
 
-        return new FunctionDeclaration($name, $params, $body, $restParam, $defaults);
+        return new FunctionDeclaration($name, $params, $body, $restParam, $defaults, $paramDestructures);
     }
 
     private function parseReturnStatement(): ReturnStmt
@@ -283,6 +474,18 @@ final class Parser
             $saved = $this->current;
             $this->advance(); // consume var/let/const
 
+            // Destructuring in for-init: for (let [a, b] = ...; ...)
+            if ($this->current->type === TokenType::LeftBracket) {
+                $init = $this->parseArrayDestructuring($kind, false);
+                $this->consumeSemicolon();
+                return $this->parseForRest($init);
+            }
+            if ($this->current->type === TokenType::LeftBrace) {
+                $init = $this->parseObjectDestructuring($kind, false);
+                $this->consumeSemicolon();
+                return $this->parseForRest($init);
+            }
+
             if ($this->current->type === TokenType::Identifier) {
                 $name = $this->current->value;
                 $this->advance(); // consume identifier
@@ -311,11 +514,25 @@ final class Parser
                 if ($this->match(TokenType::Equal)) {
                     $init_expr = $this->parseExpression();
                 }
-                $this->consumeSemicolon();
-                $init = new VarDeclaration($kind, $name, $init_expr);
+                $first = new VarDeclaration($kind, $name, $init_expr);
 
-                // Continue parsing condition and update
-                return $this->parseForRest($init);
+                // Multi-var: for (let i = 0, j = 10; ...)
+                if ($this->current->type === TokenType::Comma) {
+                    $declarations = [$first];
+                    while ($this->match(TokenType::Comma)) {
+                        $n = $this->expect(TokenType::Identifier, 'Expected variable name')->value;
+                        $e = null;
+                        if ($this->match(TokenType::Equal)) {
+                            $e = $this->parseExpression();
+                        }
+                        $declarations[] = new VarDeclaration($kind, $n, $e);
+                    }
+                    $this->consumeSemicolon();
+                    return $this->parseForRest(new VarDeclarationList($declarations));
+                }
+
+                $this->consumeSemicolon();
+                return $this->parseForRest($first);
             }
 
             // Identifier not found after var/let/const — shouldn't happen in valid JS
@@ -325,7 +542,7 @@ final class Parser
         // Regular for loop without var/let/const init
         $init = null;
         if (!$this->match(TokenType::Semicolon)) {
-            $init = new ExpressionStmt($this->parseExpression());
+            $init = new ExpressionStmt($this->parseCommaExpression());
             $this->expect(TokenType::Semicolon);
         }
 
@@ -341,16 +558,33 @@ final class Parser
         }
         $this->expect(TokenType::Semicolon);
 
-        // Update
+        // Update — supports comma operator: i++, j--
         $update = null;
         if ($this->current->type !== TokenType::RightParen) {
-            $update = $this->parseExpression();
+            $update = $this->parseCommaExpression();
         }
         $this->expect(TokenType::RightParen);
 
         $body = $this->parseStatement();
 
         return new ForStmt($init, $condition, $update, $body);
+    }
+
+    /**
+     * Parse an expression that may contain the comma operator.
+     * Returns a SequenceExpr if commas are found, otherwise a single Expr.
+     */
+    private function parseCommaExpression(): Expr
+    {
+        $first = $this->parseExpression();
+        if ($this->current->type !== TokenType::Comma) {
+            return $first;
+        }
+        $expressions = [$first];
+        while ($this->match(TokenType::Comma)) {
+            $expressions[] = $this->parseExpression();
+        }
+        return new SequenceExpr($expressions);
     }
 
     private function parseBreakStatement(): BreakStmt
@@ -420,14 +654,25 @@ final class Parser
 
         $handler = null;
         if ($this->match(TokenType::Catch)) {
-            $this->expect(TokenType::LeftParen);
-            $param = $this->expect(TokenType::Identifier, 'Expected catch parameter name')->value;
-            $this->expect(TokenType::RightParen);
+            // Optional catch binding: catch { ... } or catch (e) { ... }
+            $param = null;
+            if ($this->current->type === TokenType::LeftParen) {
+                $this->advance();
+                $param = $this->expect(TokenType::Identifier, 'Expected catch parameter name')->value;
+                $this->expect(TokenType::RightParen);
+            }
             $body = $this->parseBlockStatement();
             $handler = new CatchClause($param, $body);
         }
 
-        return new TryCatchStmt($block, $handler);
+        // finally block
+        $finalizer = null;
+        if ($this->current->type === TokenType::Identifier && $this->current->value === 'finally') {
+            $this->advance();
+            $finalizer = $this->parseBlockStatement();
+        }
+
+        return new TryCatchStmt($block, $handler, $finalizer);
     }
 
     private function parseThrowStatement(): ThrowStmt
@@ -839,9 +1084,9 @@ final class Parser
         if ($this->current->type === TokenType::Identifier) {
             $name = $this->advance()->value;
         }
-        [$params, $restParam, $defaults] = $this->parseParamList();
+        [$params, $restParam, $defaults, $paramDestructures] = $this->parseParamList();
         $body   = $this->parseBlockBody();
-        return new FunctionExpr($name, $params, $body, restParam: $restParam, defaults: $defaults);
+        return new FunctionExpr($name, $params, $body, restParam: $restParam, defaults: $defaults, paramDestructures: $paramDestructures);
     }
 
     private function parseThis(): ThisExpr
@@ -941,35 +1186,60 @@ final class Parser
         return $this->parseExpression();
     }
 
-    /** @return array{string[], ?string} [params, restParam] */
+    /** @return array{string[], ?string, array, array} [params, restParam, defaults, paramDestructures] */
     private function parseParamList(): array
     {
         $this->expect(TokenType::LeftParen);
         $params = [];
         $defaults = [];
         $restParam = null;
+        $paramDestructures = [];
+        $syntheticIdx = 0;
         if ($this->current->type !== TokenType::RightParen) {
             if ($this->current->type === TokenType::Spread) {
                 $this->advance();
                 $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
             } else {
-                $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
-                $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+                $this->parseOneParam($params, $defaults, $paramDestructures, $syntheticIdx);
                 while ($this->match(TokenType::Comma)) {
                     if ($this->current->type === TokenType::Spread) {
                         $this->advance();
                         $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
                         break;
                     }
-                    $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
-                    $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+                    $this->parseOneParam($params, $defaults, $paramDestructures, $syntheticIdx);
                 }
             }
         }
         $this->expect(TokenType::RightParen);
         // Only include defaults array if any defaults were provided
         $hasDefaults = array_filter($defaults, fn($d) => $d !== null);
-        return [$params, $restParam, $hasDefaults ? $defaults : []];
+        return [$params, $restParam, $hasDefaults ? $defaults : [], $paramDestructures];
+    }
+
+    private function parseOneParam(array &$params, array &$defaults, array &$paramDestructures, int &$syntheticIdx): void
+    {
+        if ($this->current->type === TokenType::LeftBrace || $this->current->type === TokenType::LeftBracket) {
+            $isArray = $this->current->type === TokenType::LeftBracket;
+            $pattern = $isArray ? $this->parseDestructuringPattern(true) : $this->parseDestructuringPattern(false);
+            $synthetic = '__p' . $syntheticIdx++;
+            $idx = count($params);
+            $params[] = $synthetic;
+            $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+            $paramDestructures[$idx] = $pattern;
+        } else {
+            $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
+            $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+        }
+    }
+
+    /**
+     * Parse a destructuring pattern (without = initializer) for function params.
+     * @return array{isArray: bool, bindings: array, restName: ?string}
+     */
+    private function parseDestructuringPattern(bool $isArray): array
+    {
+        return $this->parseNestedPattern($isArray);
     }
 
     // ──────────────────── Binding Powers ────────────────────

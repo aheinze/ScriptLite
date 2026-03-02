@@ -395,4 +395,23 @@ class ArraysTest extends ScriptLiteTestCase
     {
         $this->assertBothBackends('[].some(function(x) { return true; })', false);
     }
+
+    // ── reduceRight ──
+
+    public function testReduceRightBasic(): void
+    {
+        $this->assertBothBackends('[1, 2, 3, 4].reduceRight(function(acc, x) { return acc + x; }, 0)', 10);
+    }
+
+    public function testReduceRightOrder(): void
+    {
+        $this->assertBothBackends('
+            [1, 2, 3].reduceRight(function(acc, x) { return acc + "-" + x; }, "start")
+        ', 'start-3-2-1');
+    }
+
+    public function testReduceRightNoInitial(): void
+    {
+        $this->assertBothBackends('[1, 2, 3, 4].reduceRight(function(a, b) { return a - b; })', -2);
+    }
 }

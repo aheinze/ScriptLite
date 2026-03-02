@@ -11,6 +11,7 @@ final readonly class FunctionDeclaration implements Stmt
      * @param string[] $params
      * @param Stmt[]   $body
      * @param array<int, ?Expr> $defaults  Default value expressions, indexed same as $params
+     * @param array<int, array{isArray: bool, bindings: array, restName: ?string}> $paramDestructures
      */
     public function __construct(
         public string  $name,
@@ -18,5 +19,6 @@ final readonly class FunctionDeclaration implements Stmt
         public array   $body,
         public ?string $restParam = null,
         public array   $defaults = [],
+        public array   $paramDestructures = [],
     ) {}
 }

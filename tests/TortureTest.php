@@ -455,9 +455,7 @@ class TortureTest extends ScriptLiteTestCase
 
     public function testNasty07_CommaInForInit(): void
     {
-        // KNOWN LIMITATION: Comma expressions not supported in parser
-        $this->expectException(\RuntimeException::class);
-        $this->engine->eval('var a, b; for (a = 0, b = 10; a < 3; a++) {}');
+        $this->assertBothBackends('var a, b; for (a = 0, b = 10; a < 3; a++, b--) { } a + b', 10);
     }
 
     public function testNasty08_ImmediatelyInvokedArrow(): void

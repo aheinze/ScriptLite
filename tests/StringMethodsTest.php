@@ -260,4 +260,27 @@ class StringMethodsTest extends ScriptLiteTestCase
         $this->assertBothBackends('String.fromCharCode(65)', 'A');
         $this->assertBothBackends('String.fromCharCode(65, 66, 67)', 'ABC');
     }
+
+    // ═══════════════════ replace with callback ═══════════════════
+
+    public function testReplaceWithCallbackRegex(): void
+    {
+        $this->assertBothBackends('
+            "hello world".replace(/[hw]/g, function(m) { return m.toUpperCase(); })
+        ', 'Hello World');
+    }
+
+    public function testReplaceWithCallbackString(): void
+    {
+        $this->assertBothBackends('
+            "hello".replace("ell", function(m) { return m.toUpperCase(); })
+        ', 'hELLo');
+    }
+
+    public function testReplaceWithCallbackNonGlobal(): void
+    {
+        $this->assertBothBackends('
+            "aaa".replace(/a/, function(m) { return "b"; })
+        ', 'baa');
+    }
 }
