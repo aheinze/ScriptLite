@@ -1,8 +1,20 @@
 # ScriptLite
 
-An ECMAScript interpreter written in PHP 8.3+. Parses and executes a useful subset of ES2015+ — enough for algorithms, data processing, closures, constructors, regex, and more.
+A sandboxed interpreter for a subset of ECMAScript, written in PHP. Embed user-provided scripts in your PHP application for data processing, configuration logic, computed fields, template expressions, workflow rules, and more — without giving scripts access to the filesystem, network, database, or any PHP internals. It covers the most useful parts of the language (variables, functions, closures, arrays, objects, regex, error handling, destructuring, etc.) while intentionally omitting modules, classes, async/await, generators, and other heavy runtime features.
 
-Two execution backends:
+Scripts run in a sealed environment: they can only use the ECMAScript built-ins listed below and any globals you explicitly pass in. There is no `require`, no `eval`, no `process`, no `globalThis` — just pure computation on the data you provide.
+
+### Use cases
+
+- **User-defined formulas** — let users write `price * quantity * (1 - discount)` in a CMS or spreadsheet-like app
+- **Configuration logic** — express feature flags, A/B rules, or pricing tiers as scripts instead of hardcoded PHP
+- **Data transformation** — map, filter, and reshape API payloads or database rows with user-supplied logic
+- **Computed fields** — derive values in a form builder or report engine using expressions like `items.reduce((s, i) => s + i.total, 0)`
+- **Workflow / automation rules** — evaluate conditions and actions defined by end users at runtime
+- **Template expressions** — safely evaluate interpolated expressions in user-generated content
+
+### Execution backends
+
 - **Bytecode VM** — a stack-based virtual machine with 62 opcodes and register file optimization
 - **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the VM)
 
@@ -178,6 +190,19 @@ $engine->saveTranspiled($php, '/tmp/script.php');
 $__globals = ['acc' => $acc, 'multiplier' => 2];
 $result = include '/tmp/script.php';
 ```
+
+## Security model
+
+Scripts execute in a fully sandboxed environment:
+
+- **No filesystem access** — no `require`, `import`, `fs`, or file I/O of any kind
+- **No network access** — no `fetch`, `XMLHttpRequest`, or sockets
+- **No PHP internals** — no `eval`, `exec`, `system`, or access to PHP's global scope
+- **No ambient globals** — no `process`, `globalThis`, `window`, or `document`
+- **Explicit data boundary** — scripts can only see globals you pass in via the `$globals` parameter
+- **Pure computation** — the only side effects are mutations to objects/arrays you explicitly provide
+
+The attack surface is limited to CPU and memory consumption. For untrusted input, combine with PHP's `set_time_limit()` / `memory_limit` to cap resource usage.
 
 ## Architecture
 
