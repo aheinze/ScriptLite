@@ -15,8 +15,9 @@ Scripts run in a sealed environment: they can only use the ECMAScript built-ins 
 
 ### Execution backends
 
+- **C extension** — native bytecode VM with computed-goto dispatch (~130x faster than the PHP VM, ~3.5x faster than the transpiler)
 - **Bytecode VM** — a stack-based virtual machine with 62 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the PHP VM)
 
 ## Quick start
 
@@ -230,6 +231,120 @@ Scripts execute in a fully sandboxed environment:
 
 The attack surface is limited to CPU and memory consumption. For untrusted input, combine with PHP's `set_time_limit()` / `memory_limit` to cap resource usage.
 
+## C extension
+
+The optional `scriptlite` C extension replaces the PHP bytecode compiler and VM with a native implementation using computed-goto dispatch, tagged unions, and zero-copy string interning. The lexer and parser remain in PHP — the extension reads the PHP AST objects directly via the Zend API.
+
+When the extension is loaded, `Engine` uses it transparently — no code changes required:
+
+```php
+$engine = new Engine();           // auto-detects extension
+$engine = new Engine(true);       // force native (throws if unavailable)
+$engine = new Engine(false);      // force PHP VM
+```
+
+For a dedicated step-by-step build/install guide, see [`ext/scriptlite/README.md`](ext/scriptlite/README.md).
+
+### Building from source
+
+Requires PHP 8.3+ development headers, `pcre2` dev library, and a C11 compiler.
+
+```bash
+cd ext/scriptlite
+phpize
+./configure
+make -j$(nproc)
+make test            # run .phpt tests
+```
+
+This produces `modules/scriptlite.so`. To load it:
+
+```bash
+# One-off test
+php -dextension=/path/to/scriptlite.so your_script.php
+
+# Persistent — add to your php.ini or a conf.d file
+echo "extension=/path/to/scriptlite.so" | sudo tee /etc/php.d/50-scriptlite.ini
+```
+
+> The `.so` is tied to the PHP minor version it was built against (e.g. 8.3 vs 8.4). You must rebuild when switching PHP versions.
+
+### Installing with PHP PIE
+
+[PIE](https://github.com/php/pie) (PHP Installer for Extensions) can build and install from the repository:
+
+```bash
+# From a local checkout
+pie install .
+
+# Or directly from the repository
+pie install vendor/scriptlite
+```
+
+### Docker
+
+Add the build to your Dockerfile:
+
+```dockerfile
+FROM php:8.4-cli
+
+RUN apt-get update && apt-get install -y libpcre2-dev
+
+COPY ext/scriptlite /tmp/scriptlite
+RUN cd /tmp/scriptlite \
+    && phpize \
+    && ./configure \
+    && make -j$(nproc) \
+    && make install \
+    && docker-php-ext-enable scriptlite \
+    && rm -rf /tmp/scriptlite
+```
+
+### FrankenPHP
+
+FrankenPHP uses static compilation. Add the extension to your build:
+
+```bash
+# Clone FrankenPHP and add scriptlite as a build extension
+frankenphp build \
+    --with-scriptlite=/path/to/ext/scriptlite
+
+# Or in a Caddyfile-based setup, build a custom binary:
+FRANKENPHP_BUILD_EXTENSIONS="scriptlite" \
+    ./configure --with-scriptlite=/path/to/ext/scriptlite
+```
+
+Alternatively, if using the Docker image, follow the Docker instructions above with `FROM dunglas/frankenphp` as the base image.
+
+### Laravel Sail / Docker Compose
+
+Add the build step to your Sail Dockerfile:
+
+```dockerfile
+RUN apt-get update && apt-get install -y libpcre2-dev
+COPY ext/scriptlite /tmp/scriptlite
+RUN cd /tmp/scriptlite \
+    && phpize && ./configure && make -j$(nproc) && make install \
+    && docker-php-ext-enable scriptlite \
+    && rm -rf /tmp/scriptlite
+```
+
+### Verifying the extension is loaded
+
+```bash
+php -m | grep scriptlite
+# or
+php -r "var_dump(extension_loaded('scriptlite'));"
+```
+
+In application code:
+
+```php
+if (extension_loaded('scriptlite')) {
+    // Native backend available
+}
+```
+
 ## Architecture
 
 ```
@@ -239,7 +354,9 @@ ECMAScript source
   │
   ├── Parser (Pratt) ──▶ AST
   │
-  ├─┬── Compiler ──▶ Bytecode ──▶ VM (stack machine)
+  ├─┬── C Compiler ──▶ Bytecode ──▶ C VM (computed goto)    ← extension
+  │ │
+  │ ├── PHP Compiler ──▶ Bytecode ──▶ PHP VM (stack machine) ← fallback
   │ │
   │ └── PhpTranspiler ──▶ PHP source ──▶ eval (OPcache/JIT)
 ```
@@ -248,10 +365,11 @@ ECMAScript source
 |---|---|
 | `src/Lexer/` | Zero-copy tokenizer, regex literal support |
 | `src/Ast/` | AST node types + Pratt parser |
-| `src/Compiler/` | Single-pass AST → bytecode compiler |
-| `src/Vm/` | Stack-based bytecode VM |
+| `src/Compiler/` | Single-pass AST → bytecode compiler (PHP) |
+| `src/Vm/` | Stack-based bytecode VM (PHP) |
 | `src/Runtime/` | Runtime objects (JsArray, JsObject, JsClosure, JsRegex, JsDate, Environment) |
 | `src/Transpiler/` | AST → PHP source code transpiler with type inference |
+| `ext/scriptlite/` | Native C compiler + VM (optional extension) |
 
 ### VM opcodes
 
@@ -272,22 +390,49 @@ The transpiler maps ECMAScript constructs directly to PHP equivalents:
 
 ```bash
 php vendor/bin/phpunit tests/
+php -d extension=/path/to/ext/scriptlite/modules/scriptlite.so vendor/bin/phpunit tests/
 ```
 
-783 PHPUnit tests (1747 assertions) across 34 test files covering arithmetic, arrays, arrow functions, break/continue, constructors, control flow, destructuring (including nested and function params), do-while, for...of/for...in, functions, globals, JSON, number/string objects, objects, operators, optional chaining, regex, scoping, string methods (including replace with callbacks), switch, template literals, try/catch/finally, spread/rest, extended operators (increment/decrement, exponentiation, bitwise, void, delete, in, instanceof), comma operator, reduceRight, fuzzing, and edge cases.
+Current suite coverage:
+
+- 906 PHPUnit tests
+- 2224 assertions in pure-PHP mode (VM + transpiler)
+- 2229 assertions with the C extension loaded (native + transpiler)
+- 31 PHPUnit test classes, plus standalone edge scripts in `tests/edge_*.php`
+
+Without the extension loaded, native-only hardening tests are skipped by design.
 
 ## Benchmark
 
 ```bash
-php bench.php
+php bench.php                      # full benchmark (all backends)
+php bench_compare.php              # C extension vs PHP VM side-by-side
 ```
 
-Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort, matrix multiplication, string/regex processing, functional pipeline, constructors, CSV parsing, histogram, recursive tree) and compares execution modes:
+Runs 10 workloads (fibonacci, sieve, quicksort, string ops, closures, objects/vectors, recursive tree, matrix multiplication, functional pipeline, regex) and compares execution modes:
+
+### C extension vs PHP VM
+
+| Benchmark | PHP VM | C Extension | Speedup |
+|---|---|---|---|
+| fibonacci(25) | 2203 ms | 16.1 ms | **137x** |
+| sieve(5000) | 145 ms | 0.96 ms | **150x** |
+| matrix(3x3x50) | 33.2 ms | 0.22 ms | **150x** |
+| closures(5000) | 72.6 ms | 0.52 ms | **139x** |
+| pipeline(500) | 14.2 ms | 0.13 ms | **109x** |
+| tree(depth=10) | 74.1 ms | 0.79 ms | **94x** |
+| quicksort(200) | 48.2 ms | 0.63 ms | **76x** |
+| string ops | 3.7 ms | 0.11 ms | **32x** |
+| regex(200iter) | 6.0 ms | 0.57 ms | **11x** |
+| **Total** | **2625 ms** | **20.3 ms** | **~130x** |
+
+### All backends
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~77 ms | ~104x |
+| PHP VM (bytecode interpreter) | ~77 ms | ~104x |
 | Transpiled PHP (eval'd) | ~2.6 ms | ~3.5x |
+| C extension (computed goto VM) | ~0.7 ms | ~1x |
 | Native PHP (hand-written) | ~0.74 ms | 1x |
 
 

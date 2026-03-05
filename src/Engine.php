@@ -7,7 +7,6 @@ namespace ScriptLite;
 use ScriptLite\Ast\Parser;
 use ScriptLite\Compiler\Compiler;
 use ScriptLite\Compiler\CompiledScript;
-use ScriptLite\Runtime\Environment;
 use ScriptLite\Runtime\PhpObjectProxy;
 use ScriptLite\Transpiler\PhpTranspiler;
 use ScriptLite\Transpiler\Runtime\JSFunction as TrJsFunction;
@@ -34,15 +33,22 @@ use ScriptLite\Vm\VirtualMachine;
  */
 final class Engine
 {
+    public const string BACKEND_AUTO = 'auto';
+    public const string BACKEND_NATIVE = 'native';
+    public const string BACKEND_VM = 'vm';
+    public const string BACKEND_TRANSPILER = 'transpiler';
+
     private const int MAX_COMPILED_CACHE_SIZE = 32;
     private const int MAX_TRANSPILER_CACHE_SIZE = 32;
     private const int MAX_TRANSPILER_FILE_CACHE_SIZE = 16;
     private const int MAX_PARSE_CACHE_SIZE = 12;
 
     private ?VirtualMachine $lastVm = null;
+    private ?\ScriptLiteNative\VirtualMachine $lastNativeVm = null;
     private int $cacheSequence = 0;
+    private bool $useNative;
 
-    /** @var array<string, array{compiled: CompiledScript, touch: int}> */
+    /** @var array<string, array{compiled: CompiledScript|\ScriptLiteNative\CompiledScript, touch: int}> */
     private array $compiledCache = [];
 
     /** @var array<string, array{phpSource: string, touch: int}> */
@@ -56,17 +62,33 @@ final class Engine
 
     private string $tempDir;
 
-    public function __construct()
+    public function __construct(bool $useNative = true)
     {
         $this->tempDir = sys_get_temp_dir();
+        $this->useNative = $useNative && extension_loaded('scriptlite');
     }
 
     /**
-     * Parse and compile JS source to bytecode.
+     * Parse and compile JS source for the selected backend.
+     *
+     * @param list<string>|array<string, mixed> $globals
+     *        Only used by the transpiler backend to capture global names in closures.
      */
-    public function compile(string $source): CompiledScript
+    public function compile(
+        string $source,
+        string $backend = self::BACKEND_AUTO,
+        array $globals = []
+    ): CompiledScript|\ScriptLiteNative\CompiledScript|string
     {
-        $program  = $this->parseSourceCached($source);
+        $backend = $this->resolveBackend($backend);
+        if ($backend === self::BACKEND_TRANSPILER) {
+            return $this->transpile($source, $globals);
+        }
+
+        $program = $this->parseSourceCached($source);
+        if ($backend === self::BACKEND_NATIVE) {
+            return (new \ScriptLiteNative\Compiler())->compile($program);
+        }
         $compiler = new Compiler();
         return $compiler->compile($program);
     }
@@ -74,15 +96,18 @@ final class Engine
     /**
      * Parse and compile JS source to bytecode with a small LRU cache.
      */
-    private function compileCached(string $source): CompiledScript
+    private function compileCached(string $source, string $backend): CompiledScript|\ScriptLiteNative\CompiledScript
     {
-        $key = md5($source);
+        $key = md5($backend . "\0" . $source);
         if (isset($this->compiledCache[$key])) {
             $this->compiledCache[$key]['touch'] = ++$this->cacheSequence;
             return $this->compiledCache[$key]['compiled'];
         }
 
-        $compiled = $this->compile($source);
+        $compiled = $this->compile($source, $backend);
+        if (is_string($compiled)) {
+            throw new \LogicException('compileCached() cannot cache transpiler output.');
+        }
         $this->compiledCache[$key] = [
             'compiled' => $compiled,
             'touch' => ++$this->cacheSequence,
@@ -110,8 +135,19 @@ final class Engine
      *
      * @param array<string, mixed> $globals PHP values injected as JS globals
      */
-    public function run(CompiledScript $script, array $globals = []): mixed
+    public function run(CompiledScript|\ScriptLiteNative\CompiledScript|string $script, array $globals = []): mixed
     {
+        if (is_string($script)) {
+            return $this->runTranspiled($script, $globals);
+        }
+
+        if ($script instanceof \ScriptLiteNative\CompiledScript) {
+            $vm = new \ScriptLiteNative\VirtualMachine();
+            $result = $vm->execute($script, $globals);
+            $this->lastNativeVm = $vm;
+            $this->lastVm = null;
+            return $result;
+        }
         $vm = new VirtualMachine();
         $env = null;
         if (!empty($globals)) {
@@ -119,6 +155,7 @@ final class Engine
         }
         $result = $vm->execute($script, $env);
         $this->lastVm = $vm;
+        $this->lastNativeVm = null;
         return VirtualMachine::toPhp($result);
     }
 
@@ -127,9 +164,18 @@ final class Engine
      *
      * @param array<string, mixed> $globals PHP values injected as JS globals
      */
-    public function eval(string $source, array $globals = []): mixed
+    public function eval(
+        string $source,
+        array $globals = [],
+        string $backend = self::BACKEND_AUTO
+    ): mixed
     {
-        return $this->run($this->compileCached($source), $globals);
+        $backend = $this->resolveBackend($backend);
+        if ($backend === self::BACKEND_TRANSPILER) {
+            return $this->transpileAndEval($source, $globals);
+        }
+
+        return $this->run($this->compileCached($source, $backend), $globals);
     }
 
     /**
@@ -319,6 +365,25 @@ final class Engine
         return $program;
     }
 
+    private function resolveBackend(string $backend): string
+    {
+        return match ($backend) {
+            self::BACKEND_AUTO => $this->useNative ? self::BACKEND_NATIVE : self::BACKEND_VM,
+            self::BACKEND_NATIVE => $this->resolveNativeBackend(),
+            self::BACKEND_VM,
+            self::BACKEND_TRANSPILER => $backend,
+            default => throw new \InvalidArgumentException('Unsupported backend: ' . $backend),
+        };
+    }
+
+    private function resolveNativeBackend(): string
+    {
+        if (!extension_loaded('scriptlite')) {
+            throw new \RuntimeException('Native backend requested but "scriptlite" extension is not loaded.');
+        }
+        return self::BACKEND_NATIVE;
+    }
+
     /**
      * Save transpiled PHP source to a file for repeated inclusion.
      *
@@ -342,6 +407,9 @@ final class Engine
      */
     public function getOutput(): string
     {
+        if ($this->lastNativeVm !== null) {
+            return $this->lastNativeVm->getOutput();
+        }
         return $this->lastVm?->getOutput() ?? '';
     }
 

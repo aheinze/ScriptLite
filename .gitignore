@@ -33,5 +33,27 @@ coverage.xml
 /build/
 /dist/
 
+# C extension build artifacts (phpize/make output)
+ext/scriptlite/.libs/
+ext/scriptlite/autom4te.cache/
+ext/scriptlite/build/
+ext/scriptlite/modules/
+ext/scriptlite/configure
+ext/scriptlite/configure.ac
+ext/scriptlite/config.h
+ext/scriptlite/config.h.in
+ext/scriptlite/config.log
+ext/scriptlite/config.nice
+ext/scriptlite/config.status
+ext/scriptlite/libtool
+ext/scriptlite/Makefile
+ext/scriptlite/Makefile.fragments
+ext/scriptlite/Makefile.objects
+ext/scriptlite/run-tests.php
+ext/scriptlite/*.lo
+ext/scriptlite/*.la
+ext/scriptlite/*.dep
+ext/scriptlite/*.o
+
 # Logs
 *.log
