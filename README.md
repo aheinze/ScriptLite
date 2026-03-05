@@ -191,6 +191,32 @@ $__globals = ['acc' => $acc, 'multiplier' => 2];
 $result = include '/tmp/script.php';
 ```
 
+## Caching
+
+The `Engine` instance maintains LRU caches at every stage of the pipeline. Reuse the same instance for best performance:
+
+```php
+$engine = new Engine();
+
+// Repeated eval() calls with the same source skip recompilation
+$engine->eval($script, ['x' => 1]);
+$engine->eval($script, ['x' => 2]); // bytecode served from cache
+
+// transpile() and runTranspiled() also cache automatically
+$php = $engine->transpile($script, ['x']); // cached after first call
+$engine->runTranspiled($php, ['x' => 1]); // temp file reused + OPcache'd
+$engine->runTranspiled($php, ['x' => 2]); // same cached file
+```
+
+| Cache layer | Scope | Max entries |
+|---|---|---|
+| Parse (AST) | Shared by `compile()` and `transpile()` | 12 |
+| Compiled bytecode | `eval()` | 32 |
+| Transpiled PHP source | `transpile()` | 32 |
+| Transpiled temp files | `runTranspiled()` | 16 |
+
+Temp files are written to `sys_get_temp_dir()` and precompiled with `opcache_compile_file()` when available. The file cache evicts the least-recently-used entry and cleans up the corresponding file on disk.
+
 ## Security model
 
 Scripts execute in a fully sandboxed environment:
@@ -260,9 +286,9 @@ Runs 10 workloads (sieve of Eratosthenes, fibonacci with memoization, quicksort,
 
 | Mode | Execution time | vs Native PHP |
 |---|---|---|
-| VM (bytecode interpreter) | ~80 ms | ~108x |
+| VM (bytecode interpreter) | ~77 ms | ~104x |
 | Transpiled PHP (eval'd) | ~2.6 ms | ~3.5x |
-| Native PHP (hand-written) | ~0.75 ms | 1x |
+| Native PHP (hand-written) | ~0.74 ms | 1x |
 
 
 ## License
