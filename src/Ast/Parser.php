@@ -709,24 +709,25 @@ final class Parser
         // Infix / LED (left denotation)
         $inOptionalChain = false;
         while (true) {
-            $bp = $this->infixBindingPower($this->current->type);
-            if ($bp === null || $bp[0] < $minBp) {
+            $currentType = $this->current->type;
+            $bp = $this->infixBindingPower($currentType);
+            if ($bp === null || ($bp >> 8) < $minBp) {
                 break;
             }
-            [$leftBp, $rightBp] = $bp;
+            $rightBp = $bp & 0xFF;
 
             // Reset chain flag on non-chain tokens
-            $isChainToken = $this->current->type === TokenType::Dot
-                || $this->current->type === TokenType::OptionalChain
-                || $this->current->type === TokenType::LeftBracket
-                || $this->current->type === TokenType::LeftParen;
+            $isChainToken = $currentType === TokenType::Dot
+                || $currentType === TokenType::OptionalChain
+                || $currentType === TokenType::LeftBracket
+                || $currentType === TokenType::LeftParen;
             if (!$isChainToken) {
                 $inOptionalChain = false;
             }
 
             // Special handling for logical operators (short-circuit semantics in VM)
-            if ($this->current->type === TokenType::And || $this->current->type === TokenType::Or
-                || $this->current->type === TokenType::NullishCoalesce) {
+            if ($currentType === TokenType::And || $currentType === TokenType::Or
+                || $currentType === TokenType::NullishCoalesce) {
                 $op = $this->advance()->value;
                 $right = $this->parseExpression($rightBp);
                 $left = new LogicalExpr($left, $op, $right);
@@ -734,14 +735,14 @@ final class Parser
             }
 
             // Member access — ., ?. and [ as infix
-            if ($this->current->type === TokenType::Dot) {
+            if ($currentType === TokenType::Dot) {
                 $this->advance();
                 $prop = $this->expect(TokenType::Identifier, 'Expected property name after "."');
                 $left = new MemberExpr($left, new Identifier($prop->value), false, optionalChain: $inOptionalChain);
                 continue;
             }
 
-            if ($this->current->type === TokenType::OptionalChain) {
+            if ($currentType === TokenType::OptionalChain) {
                 $this->advance();
                 $inOptionalChain = true;
                 if ($this->current->type === TokenType::LeftBracket) {
@@ -760,7 +761,7 @@ final class Parser
                 continue;
             }
 
-            if ($this->current->type === TokenType::LeftBracket) {
+            if ($currentType === TokenType::LeftBracket) {
                 $this->advance();
                 $prop = $this->parseExpression();
                 $this->expect(TokenType::RightBracket);
@@ -769,13 +770,13 @@ final class Parser
             }
 
             // Function call — ( is an infix operator with high binding power
-            if ($this->current->type === TokenType::LeftParen) {
+            if ($currentType === TokenType::LeftParen) {
                 $left = $this->parseCallExpr($left, optionalChain: $inOptionalChain);
                 continue;
             }
 
             // Ternary conditional: cond ? then : else
-            if ($this->current->type === TokenType::Question) {
+            if ($currentType === TokenType::Question) {
                 $this->advance(); // consume ?
                 $consequent = $this->parseExpression(); // full expression for the "then" branch
                 $this->expect(TokenType::Colon, "Expected ':' in ternary expression");
@@ -786,7 +787,7 @@ final class Parser
             }
 
             // Arrow function: x => body (single param, no parens)
-            if ($this->current->type === TokenType::Arrow) {
+            if ($currentType === TokenType::Arrow) {
                 if (!$left instanceof Identifier) {
                     throw new ParserException('Arrow function parameter must be an identifier', $this->current);
                 }
@@ -796,7 +797,7 @@ final class Parser
             }
 
             // Postfix ++/-- (no right operand)
-            if ($this->current->type === TokenType::PlusPlus || $this->current->type === TokenType::MinusMinus) {
+            if ($currentType === TokenType::PlusPlus || $currentType === TokenType::MinusMinus) {
                 $op = $this->advance()->value;
                 if (!($left instanceof Identifier) && !($left instanceof MemberExpr)) {
                     throw new ParserException('Invalid left-hand side in postfix operation', $this->current);
@@ -806,7 +807,7 @@ final class Parser
             }
 
             // Assignment operators
-            if ($this->isAssignOp($this->current->type)) {
+            if ($this->isAssignOp($currentType)) {
                 $op = $this->advance()->value;
                 $right = $this->parseExpression($rightBp);
                 if ($left instanceof Identifier) {
@@ -913,10 +914,46 @@ final class Parser
             return new FunctionExpr(null, [], $this->parseArrowBody(), isArrow: true, restParam: $restName);
         }
 
-        // Parse comma-separated expressions (could be params or a single grouped expr)
-        $exprs = [$this->parseExpression()];
+        // Parse first expression (may be single param or grouped expression)
+        $expr = $this->parseExpression();
+        if ($this->current->type !== TokenType::Comma) {
+            $this->expect(TokenType::RightParen);
+
+            // No comma means either a single grouped expression or a single-param arrow
+            if ($this->current->type !== TokenType::Arrow) {
+                return $expr;
+            }
+
+            $this->advance();
+            $params = [];
+            $defaults = [];
+            $hasDefaults = false;
+            if ($expr instanceof Identifier) {
+                $params[] = $expr->name;
+                $defaults[] = null;
+            } elseif ($expr instanceof AssignExpr && $expr->operator === '=') {
+                $params[] = $expr->name;
+                $defaults[] = $expr->value;
+                $hasDefaults = true;
+            } else {
+                throw new ParserException('Arrow function parameters must be identifiers', $this->current);
+            }
+            return new FunctionExpr(
+                null,
+                $params,
+                $this->parseArrowBody(),
+                isArrow: true,
+                defaults: $hasDefaults ? $defaults : [],
+            );
+        }
+
+        $exprs = [$expr];
+        $hasDefaults = false;
         $restParam = null;
         while ($this->match(TokenType::Comma)) {
+            if ($this->current->type === TokenType::RightParen) {
+                break; // trailing comma
+            }
             if ($this->current->type === TokenType::Spread) {
                 $this->advance();
                 $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
@@ -938,11 +975,11 @@ final class Parser
                 } elseif ($expr instanceof AssignExpr && $expr->operator === '=') {
                     $params[] = $expr->name;
                     $defaults[] = $expr->value;
+                    $hasDefaults = true;
                 } else {
                     throw new ParserException('Arrow function parameters must be identifiers', $this->current);
                 }
             }
-            $hasDefaults = array_filter($defaults, fn($d) => $d !== null);
             return new FunctionExpr(null, $params, $this->parseArrowBody(), isArrow: true, restParam: $restParam, defaults: $hasDefaults ? $defaults : []);
         }
 
@@ -1195,42 +1232,61 @@ final class Parser
         $restParam = null;
         $paramDestructures = [];
         $syntheticIdx = 0;
+        $paramIndex = 0;
+        $hasDefaults = false;
         if ($this->current->type !== TokenType::RightParen) {
             if ($this->current->type === TokenType::Spread) {
                 $this->advance();
                 $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
             } else {
-                $this->parseOneParam($params, $defaults, $paramDestructures, $syntheticIdx);
+                $this->parseOneParam($params, $defaults, $paramDestructures, $paramIndex, $syntheticIdx, $hasDefaults);
                 while ($this->match(TokenType::Comma)) {
                     if ($this->current->type === TokenType::Spread) {
                         $this->advance();
                         $restParam = $this->expect(TokenType::Identifier, 'Expected rest parameter name')->value;
                         break;
                     }
-                    $this->parseOneParam($params, $defaults, $paramDestructures, $syntheticIdx);
+                    $this->parseOneParam($params, $defaults, $paramDestructures, $paramIndex, $syntheticIdx, $hasDefaults);
                 }
             }
         }
         $this->expect(TokenType::RightParen);
         // Only include defaults array if any defaults were provided
-        $hasDefaults = array_filter($defaults, fn($d) => $d !== null);
         return [$params, $restParam, $hasDefaults ? $defaults : [], $paramDestructures];
     }
 
-    private function parseOneParam(array &$params, array &$defaults, array &$paramDestructures, int &$syntheticIdx): void
-    {
+    private function parseOneParam(
+        array &$params,
+        array &$defaults,
+        array &$paramDestructures,
+        int &$paramIndex,
+        int &$syntheticIdx,
+        bool &$hasDefaults,
+    ): void {
+        $default = null;
+
         if ($this->current->type === TokenType::LeftBrace || $this->current->type === TokenType::LeftBracket) {
             $isArray = $this->current->type === TokenType::LeftBracket;
             $pattern = $isArray ? $this->parseDestructuringPattern(true) : $this->parseDestructuringPattern(false);
             $synthetic = '__p' . $syntheticIdx++;
-            $idx = count($params);
+            $idx = $paramIndex++;
             $params[] = $synthetic;
-            $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+            if ($this->match(TokenType::Equal)) {
+                $default = $this->parseExpression();
+                $hasDefaults = true;
+            }
+            $defaults[] = $default;
             $paramDestructures[$idx] = $pattern;
-        } else {
-            $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
-            $defaults[] = $this->match(TokenType::Equal) ? $this->parseExpression() : null;
+            return;
         }
+
+        $paramIndex++;
+        $params[] = $this->expect(TokenType::Identifier, 'Expected parameter name')->value;
+        if ($this->match(TokenType::Equal)) {
+            $default = $this->parseExpression();
+            $hasDefaults = true;
+        }
+        $defaults[] = $default;
     }
 
     /**
@@ -1245,77 +1301,85 @@ final class Parser
     // ──────────────────── Binding Powers ────────────────────
 
     /**
-     * Returns [leftBp, rightBp] for infix operators, or null if not an infix op.
+     * Packed binding power table for infix operators.
+     * Value format: (leftBp << 8) | rightBp.
+     */
+    private const array INFIX_BINDING_POWER = [
+        TokenType::Arrow->value                => (2 << 8) | 1,
+        TokenType::Equal->value                => (2 << 8) | 1,
+        TokenType::PlusEqual->value            => (2 << 8) | 1,
+        TokenType::MinusEqual->value           => (2 << 8) | 1,
+        TokenType::StarEqual->value            => (2 << 8) | 1,
+        TokenType::SlashEqual->value           => (2 << 8) | 1,
+        TokenType::PercentEqual->value         => (2 << 8) | 1,
+        TokenType::StarStarEqual->value        => (2 << 8) | 1,
+        TokenType::AmpersandEqual->value       => (2 << 8) | 1,
+        TokenType::PipeEqual->value            => (2 << 8) | 1,
+        TokenType::CaretEqual->value           => (2 << 8) | 1,
+        TokenType::LeftShiftEqual->value       => (2 << 8) | 1,
+        TokenType::RightShiftEqual->value      => (2 << 8) | 1,
+        TokenType::UnsignedRightShiftEqual->value => (2 << 8) | 1,
+        TokenType::NullishCoalesceEqual->value => (2 << 8) | 1,
+        TokenType::Question->value              => (4 << 8) | 3,
+        TokenType::NullishCoalesce->value       => (6 << 8) | 7,
+        TokenType::Or->value                    => (8 << 8) | 9,
+        TokenType::And->value                   => (10 << 8) | 11,
+        TokenType::Pipe->value                  => (12 << 8) | 13,
+        TokenType::Caret->value                 => (14 << 8) | 15,
+        TokenType::Ampersand->value             => (16 << 8) | 17,
+        TokenType::EqualEqual->value            => (18 << 8) | 19,
+        TokenType::NotEqual->value              => (18 << 8) | 19,
+        TokenType::StrictEqual->value           => (18 << 8) | 19,
+        TokenType::StrictNotEqual->value        => (18 << 8) | 19,
+        TokenType::Less->value                  => (20 << 8) | 21,
+        TokenType::LessEqual->value             => (20 << 8) | 21,
+        TokenType::Greater->value               => (20 << 8) | 21,
+        TokenType::GreaterEqual->value          => (20 << 8) | 21,
+        TokenType::In->value                    => (20 << 8) | 21,
+        TokenType::Instanceof->value            => (20 << 8) | 21,
+        TokenType::LeftShift->value             => (22 << 8) | 23,
+        TokenType::RightShift->value            => (22 << 8) | 23,
+        TokenType::UnsignedRightShift->value    => (22 << 8) | 23,
+        TokenType::Plus->value                  => (24 << 8) | 25,
+        TokenType::Minus->value                 => (24 << 8) | 25,
+        TokenType::Star->value                  => (26 << 8) | 27,
+        TokenType::Slash->value                 => (26 << 8) | 27,
+        TokenType::Percent->value               => (26 << 8) | 27,
+        TokenType::StarStar->value              => (29 << 8) | 28,
+        TokenType::PlusPlus->value              => (31 << 8) | 32,
+        TokenType::MinusMinus->value            => (31 << 8) | 32,
+        TokenType::Dot->value                   => (33 << 8) | 34,
+        TokenType::OptionalChain->value         => (33 << 8) | 34,
+        TokenType::LeftBracket->value           => (33 << 8) | 34,
+        TokenType::LeftParen->value             => (33 << 8) | 34,
+    ];
+
+    private const array ASSIGN_OPS = [
+        TokenType::Equal->value => true,
+        TokenType::PlusEqual->value => true,
+        TokenType::MinusEqual->value => true,
+        TokenType::StarEqual->value => true,
+        TokenType::SlashEqual->value => true,
+        TokenType::PercentEqual->value => true,
+        TokenType::StarStarEqual->value => true,
+        TokenType::AmpersandEqual->value => true,
+        TokenType::PipeEqual->value => true,
+        TokenType::CaretEqual->value => true,
+        TokenType::LeftShiftEqual->value => true,
+        TokenType::RightShiftEqual->value => true,
+        TokenType::UnsignedRightShiftEqual->value => true,
+        TokenType::NullishCoalesceEqual->value => true,
+    ];
+
+    /**
+     * Returns packed binding power for infix operators, or null if not infix.
+     * Value format: (leftBp << 8) | rightBp.
      * Left-associative: rightBp = leftBp + 1
      * Right-associative: rightBp = leftBp (assignment)
      */
-    private function infixBindingPower(TokenType $type): ?array
+    private function infixBindingPower(TokenType $type): ?int
     {
-        return match ($type) {
-            // Arrow function: x => body (right-assoc, same level as assignment)
-            TokenType::Arrow => [2, 1],
-
-            // Assignment (right-assoc)
-            TokenType::Equal, TokenType::PlusEqual, TokenType::MinusEqual,
-            TokenType::StarEqual, TokenType::SlashEqual,
-            TokenType::PercentEqual, TokenType::StarStarEqual,
-            TokenType::AmpersandEqual, TokenType::PipeEqual, TokenType::CaretEqual,
-            TokenType::LeftShiftEqual, TokenType::RightShiftEqual,
-            TokenType::UnsignedRightShiftEqual,
-            TokenType::NullishCoalesceEqual => [2, 1],
-
-            // Ternary (right-assoc, just above assignment)
-            TokenType::Question => [4, 3],
-
-            // Nullish coalescing
-            TokenType::NullishCoalesce => [6, 7],
-
-            // Logical OR
-            TokenType::Or => [8, 9],
-
-            // Logical AND
-            TokenType::And => [10, 11],
-
-            // Bitwise OR
-            TokenType::Pipe => [12, 13],
-
-            // Bitwise XOR
-            TokenType::Caret => [14, 15],
-
-            // Bitwise AND
-            TokenType::Ampersand => [16, 17],
-
-            // Equality
-            TokenType::EqualEqual, TokenType::NotEqual,
-            TokenType::StrictEqual, TokenType::StrictNotEqual => [18, 19],
-
-            // Relational (comparison + in + instanceof)
-            TokenType::Less, TokenType::LessEqual,
-            TokenType::Greater, TokenType::GreaterEqual,
-            TokenType::In, TokenType::Instanceof => [20, 21],
-
-            // Shift
-            TokenType::LeftShift, TokenType::RightShift,
-            TokenType::UnsignedRightShift => [22, 23],
-
-            // Additive
-            TokenType::Plus, TokenType::Minus => [24, 25],
-
-            // Multiplicative
-            TokenType::Star, TokenType::Slash, TokenType::Percent => [26, 27],
-
-            // Exponentiation (right-assoc)
-            TokenType::StarStar => [29, 28],
-
-            // Postfix ++/--
-            TokenType::PlusPlus, TokenType::MinusMinus => [31, 32],
-
-            // Member access & Call — same precedence, left-to-right
-            TokenType::Dot, TokenType::OptionalChain, TokenType::LeftBracket,
-            TokenType::LeftParen => [33, 34],
-
-            default => null,
-        };
+        return self::INFIX_BINDING_POWER[$type->value] ?? null;
     }
 
     private function prefixBindingPower(string $op): int
@@ -1328,15 +1392,6 @@ final class Parser
 
     private function isAssignOp(TokenType $type): bool
     {
-        return match ($type) {
-            TokenType::Equal, TokenType::PlusEqual, TokenType::MinusEqual,
-            TokenType::StarEqual, TokenType::SlashEqual,
-            TokenType::PercentEqual, TokenType::StarStarEqual,
-            TokenType::AmpersandEqual, TokenType::PipeEqual, TokenType::CaretEqual,
-            TokenType::LeftShiftEqual, TokenType::RightShiftEqual,
-            TokenType::UnsignedRightShiftEqual,
-            TokenType::NullishCoalesceEqual => true,
-            default => false,
-        };
+        return isset(self::ASSIGN_OPS[$type->value]);
     }
 }

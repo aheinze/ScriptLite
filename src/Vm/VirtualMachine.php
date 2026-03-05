@@ -57,8 +57,10 @@ final class VirtualMachine
     private array $frames = [];
     private int $frameCount = 0;
 
-    /** @var array<array{catchIP: int, frameCount: int, sp: int, env: Environment}> */
+    /** @var array<int[]> */
     private array $handlers = [];
+    /** @var \Closure(mixed, array): mixed */
+    private \Closure $callbackInvoker;
 
     /** Current frame (cached for hot-loop performance) */
     private CallFrame $frame;
@@ -67,6 +69,13 @@ final class VirtualMachine
     private string $output = '';
 
     private const int MAX_FRAMES = 512;
+
+    public function __construct()
+    {
+        $this->callbackInvoker = function (mixed $fn, array $a): mixed {
+            return $this->invokeFunction($fn, $a);
+        };
+    }
 
     public function execute(CompiledScript $script, ?Environment $globalEnv = null): mixed
     {
@@ -365,10 +374,10 @@ final class VirtualMachine
             // ── Exception handling ──
             case OpCode::SetCatch:
                 $this->handlers[] = [
-                    'catchIP' => $opA[$ci],
-                    'frameCount' => $this->frameCount,
-                    'sp' => $sp,
-                    'env' => $env,
+                    $opA[$ci], // catchIP
+                    $this->frameCount,
+                    $sp,
+                    $env,
                 ];
                 break;
             case OpCode::PopCatch:
@@ -545,39 +554,36 @@ final class VirtualMachine
             // ── Arrays / Objects (inlined where simple, sync for property ops) ──
             case OpCode::MakeArray:
                 $count = $opA[$ci];
-                $elements = [];
+                $elements = array_fill(0, $count, null);
                 for ($j = $count - 1; $j >= 0; $j--) {
                     $elements[$j] = $stack[--$sp];
                 }
-                ksort($elements);
                 $stack[$sp++] = new JsArray($elements);
                 break;
 
             case OpCode::MakeObject:
                 $count = $opA[$ci];
-                $pairs = [];
-                for ($j = 0; $j < $count; $j++) {
-                    $value = $stack[--$sp];
-                    $key = $stack[--$sp];
-                    $pairs[] = [(string) $key, $value];
-                }
                 $properties = [];
-                for ($j = count($pairs) - 1; $j >= 0; $j--) {
-                    $properties[$pairs[$j][0]] = $pairs[$j][1];
+                $keys = [];
+                $values = [];
+                for ($j = $count - 1; $j >= 0; $j--) {
+                    $values[$j] = $stack[--$sp];
+                    $keys[$j] = (string) $stack[--$sp];
+                }
+                for ($j = 0; $j < $count; $j++) {
+                    $properties[$keys[$j]] = $values[$j];
                 }
                 $stack[$sp++] = new JsObject($properties);
                 break;
 
             case OpCode::GetProperty:
                 $this->sp = $sp;
-                $frame->env = $env;
                 $this->getProperty();
                 $sp = $this->sp;
                 break;
 
             case OpCode::GetPropertyOpt:
                 $this->sp = $sp;
-                $frame->env = $env;
                 $this->getPropertyOpt();
                 $sp = $this->sp;
                 break;
@@ -665,33 +671,33 @@ final class VirtualMachine
 
             // ── Arithmetic ──
             OpCode::Add    => $this->binaryAdd(),
-            OpCode::Sub    => $this->binaryOp(fn($x, $y) => $x - $y),
-            OpCode::Mul    => $this->binaryOp(fn($x, $y) => $x * $y),
-            OpCode::Div    => $this->binaryOp(fn($x, $y) => $y == 0 ? ($x == 0 ? NAN : ($x > 0 ? INF : -INF)) : $x / $y),
-            OpCode::Mod    => $this->binaryOp(fn($x, $y) => fmod($x, $y)),
+            OpCode::Sub    => $this->binarySub(),
+            OpCode::Mul    => $this->binaryMul(),
+            OpCode::Div    => $this->binaryDiv(),
+            OpCode::Mod    => $this->binaryMod(),
             OpCode::Negate => $this->push(-$this->pop()),
             OpCode::Not    => $this->push(!$this->isTruthy($this->pop())),
             OpCode::Typeof => $this->push($this->jsTypeof($this->pop())),
-            OpCode::Exp    => $this->binaryOp(fn($x, $y) => $x ** $y),
+            OpCode::Exp    => $this->binaryExp(),
 
             // ── Bitwise ──
-            OpCode::BitAnd => $this->binaryOp(fn($x, $y) => ((int) $x) & ((int) $y)),
-            OpCode::BitOr  => $this->binaryOp(fn($x, $y) => ((int) $x) | ((int) $y)),
-            OpCode::BitXor => $this->binaryOp(fn($x, $y) => ((int) $x) ^ ((int) $y)),
+            OpCode::BitAnd => $this->binaryBitAnd(),
+            OpCode::BitOr  => $this->binaryBitOr(),
+            OpCode::BitXor => $this->binaryBitXor(),
             OpCode::BitNot => $this->push(~((int) $this->pop())),
-            OpCode::Shl    => $this->binaryOp(fn($x, $y) => ((int) $x) << (((int) $y) & 0x1F)),
-            OpCode::Shr    => $this->binaryOp(fn($x, $y) => ((int) $x) >> (((int) $y) & 0x1F)),
-            OpCode::Ushr   => $this->binaryOp(fn($x, $y) => (((int) $x) & 0xFFFFFFFF) >> (((int) $y) & 0x1F)),
+            OpCode::Shl    => $this->binaryShl(),
+            OpCode::Shr    => $this->binaryShr(),
+            OpCode::Ushr   => $this->binaryUshr(),
 
             // ── Comparison ──
-            OpCode::Eq       => $this->binaryOp(fn($x, $y) => $x == $y),
-            OpCode::Neq      => $this->binaryOp(fn($x, $y) => $x != $y),
-            OpCode::StrictEq => $this->binaryOp(fn($x, $y) => $this->strictEqual($x, $y)),
-            OpCode::StrictNeq => $this->binaryOp(fn($x, $y) => !$this->strictEqual($x, $y)),
-            OpCode::Lt       => $this->binaryOp(fn($x, $y) => $x < $y),
-            OpCode::Lte      => $this->binaryOp(fn($x, $y) => $x <= $y),
-            OpCode::Gt       => $this->binaryOp(fn($x, $y) => $x > $y),
-            OpCode::Gte      => $this->binaryOp(fn($x, $y) => $x >= $y),
+            OpCode::Eq       => $this->binaryEq(),
+            OpCode::Neq      => $this->binaryNeq(),
+            OpCode::StrictEq => $this->binaryStrictEq(),
+            OpCode::StrictNeq => $this->binaryStrictNeq(),
+            OpCode::Lt       => $this->binaryLt(),
+            OpCode::Lte      => $this->binaryLte(),
+            OpCode::Gt       => $this->binaryGt(),
+            OpCode::Gte      => $this->binaryGte(),
 
             // ── Property tests / delete ──
             OpCode::HasProp    => $this->hasProp(),
@@ -712,12 +718,7 @@ final class VirtualMachine
             OpCode::JumpIfNotNullish => $this->jumpIfNotNullish($a),
 
             // ── Exception handling ──
-            OpCode::SetCatch => $this->handlers[] = [
-                'catchIP' => $a,
-                'frameCount' => $this->frameCount,
-                'sp' => $this->sp,
-                'env' => $this->frame->env,
-            ],
+            OpCode::SetCatch => $this->handlers[] = [$a, $this->frameCount, $this->sp, $this->frame->env],
             OpCode::PopCatch => array_pop($this->handlers),
             OpCode::Throw    => throw new JsThrowable($this->pop()),
 
@@ -767,13 +768,15 @@ final class VirtualMachine
 
             $ac = count($args);
             $paramCount = count($desc->params);
+            $lastPositionalArg = $ac > $paramCount ? $paramCount : $ac;
             for ($i = 0; $i < $paramCount; $i++) {
                 if (!isset($desc->paramSlots[$i]) || $desc->paramSlots[$i] < 0) {
-                    $callEnv->define($desc->params[$i], $i < $ac ? $args[$i] : JsUndefined::Value);
+                    $callEnv->define($desc->params[$i], $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value);
                 }
             }
             if ($desc->restParam !== null && $desc->restParamSlot < 0) {
-                $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
+                $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                $callEnv->define($desc->restParam, new JsArray($rest));
             }
 
             $targetFrameCount = $this->frameCount;
@@ -784,11 +787,12 @@ final class VirtualMachine
                 $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
                 for ($i = 0; $i < $paramCount; $i++) {
                     if (isset($desc->paramSlots[$i]) && $desc->paramSlots[$i] >= 0) {
-                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $ac ? $args[$i] : JsUndefined::Value;
+                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value;
                     }
                 }
                 if ($desc->restParam !== null && $desc->restParamSlot >= 0) {
-                    $this->frame->registers[$desc->restParamSlot] = new JsArray(array_slice($args, $paramCount));
+                    $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                    $this->frame->registers[$desc->restParamSlot] = new JsArray($rest);
                 }
             }
 
@@ -806,7 +810,7 @@ final class VirtualMachine
                     }
                 } catch (\Throwable $e) {
                     $thrown = $e instanceof JsThrowable ? $e->value : $e->getMessage();
-                    if (empty($this->handlers) || end($this->handlers)['frameCount'] < $targetFrameCount) {
+                    if (empty($this->handlers) || end($this->handlers)[1] < $targetFrameCount) {
                         throw $e; // No handler in this call scope, propagate
                     }
                     $this->handleThrow($thrown);
@@ -833,13 +837,6 @@ final class VirtualMachine
 
     // ──────────────────── Binary Ops ────────────────────
 
-    private function binaryOp(\Closure $fn): void
-    {
-        $b = $this->pop();
-        $a = $this->pop();
-        $this->push($fn($a, $b));
-    }
-
     /**
      * JS + semantics: if either operand is a string, concatenate; else numeric add.
      */
@@ -853,6 +850,170 @@ final class VirtualMachine
         } else {
             $this->push($this->toNumber($a) + $this->toNumber($b));
         }
+    }
+
+    private function binarySub(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push((is_int($a) || is_float($a) ? $a : $this->toNumber($a))
+            - (is_int($b) || is_float($b) ? $b : $this->toNumber($b)));
+    }
+
+    private function binaryMul(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push((is_int($a) || is_float($a) ? $a : $this->toNumber($a))
+            * (is_int($b) || is_float($b) ? $b : $this->toNumber($b)));
+    }
+
+    private function binaryDiv(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push($b == 0
+            ? ($a == 0 ? NAN : ($a > 0 ? INF : -INF))
+            : $a / $b);
+    }
+
+    private function binaryMod(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(fmod(
+            is_int($a) || is_float($a) ? $a : $this->toNumber($a),
+            is_int($b) || is_float($b) ? $b : $this->toNumber($b),
+        ));
+    }
+
+    private function binaryExp(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push($a ** $b);
+    }
+
+    private function binaryBitAnd(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(((int) $a) & ((int) $b));
+    }
+
+    private function binaryBitOr(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(((int) $a) | ((int) $b));
+    }
+
+    private function binaryBitXor(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(((int) $a) ^ ((int) $b));
+    }
+
+    private function binaryShl(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(((int) $a) << (((int) $b) & 0x1F));
+    }
+
+    private function binaryShr(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(((int) $a) >> (((int) $b) & 0x1F));
+    }
+
+    private function binaryUshr(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push((((int) $a) & 0xFFFFFFFF) >> (((int) $b) & 0x1F));
+    }
+
+    private function binaryEq(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push($this->jsLooseEqual($a, $b));
+    }
+
+    private function binaryNeq(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(!$this->jsLooseEqual($a, $b));
+    }
+
+    private function binaryStrictEq(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push($this->strictEqual($a, $b));
+    }
+
+    private function binaryStrictNeq(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        $this->push(!$this->strictEqual($a, $b));
+    }
+
+    private function binaryLt(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        if (is_bool($a)) { $a = $a ? 1 : 0; }
+        if (is_bool($b)) { $b = $b ? 1 : 0; }
+        if (is_object($a) || is_object($b)) {
+            $this->push(false);
+            return;
+        }
+        $this->push($a < $b);
+    }
+
+    private function binaryLte(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        if (is_bool($a)) { $a = $a ? 1 : 0; }
+        if (is_bool($b)) { $b = $b ? 1 : 0; }
+        if (is_object($a) || is_object($b)) {
+            $this->push(false);
+            return;
+        }
+        $this->push($a <= $b);
+    }
+
+    private function binaryGt(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        if (is_bool($a)) { $a = $a ? 1 : 0; }
+        if (is_bool($b)) { $b = $b ? 1 : 0; }
+        if (is_object($a) || is_object($b)) {
+            $this->push(false);
+            return;
+        }
+        $this->push($a > $b);
+    }
+
+    private function binaryGte(): void
+    {
+        $b = $this->pop();
+        $a = $this->pop();
+        if (is_bool($a)) { $a = $a ? 1 : 0; }
+        if (is_bool($b)) { $b = $b ? 1 : 0; }
+        if (is_object($a) || is_object($b)) {
+            $this->push(false);
+            return;
+        }
+        $this->push($a >= $b);
     }
 
     // ──────────────────── Variable Ops ────────────────────
@@ -906,23 +1067,93 @@ final class VirtualMachine
         // Get callee from stack
         $calleeIdx = $this->sp - $argCount - 1;
         $callee    = $this->stack[$calleeIdx];
-
-        // Collect arguments
-        $args = [];
-        for ($i = 0; $i < $argCount; $i++) {
-            $args[] = $this->stack[$calleeIdx + 1 + $i];
-        }
+        $argsStart = $calleeIdx + 1;
 
         // Reset stack to before callee
         $this->sp = $calleeIdx;
 
         if ($callee instanceof JsClosure) {
-            $this->callClosure($callee, $args);
+            $this->callClosureFromStack($callee, $argsStart, $argCount);
         } elseif ($callee instanceof NativeFunction) {
-            $result = ($callee->callable)(...$args);
+            $result = $this->callNativeFromStack($callee, $argsStart, $argCount);
             $this->push($result ?? JsUndefined::Value);
         } else {
             throw new VmException('TypeError: ' . gettype($callee) . ' is not a function');
+        }
+    }
+
+    private function callNativeFromStack(NativeFunction $callee, int $argsStart, int $argCount): mixed
+    {
+        $fn = $callee->callable;
+        return match ($argCount) {
+            0 => $fn(),
+            1 => $fn($this->stack[$argsStart]),
+            2 => $fn($this->stack[$argsStart], $this->stack[$argsStart + 1]),
+            3 => $fn($this->stack[$argsStart], $this->stack[$argsStart + 1], $this->stack[$argsStart + 2]),
+            default => $fn(...array_slice($this->stack, $argsStart, $argCount)),
+        };
+    }
+
+    private function callClosureFromStack(JsClosure $closure, int $argsStart, int $argCount): void
+    {
+        if ($this->frameCount >= self::MAX_FRAMES) {
+            throw new VmException('RangeError: Maximum call stack size exceeded');
+        }
+
+        $desc = $closure->descriptor;
+
+        // Create new environment extending the closure's captured environment
+        $callEnv = $closure->capturedEnv->extend();
+        $paramCount = count($desc->params);
+        $slots = $desc->paramSlots;
+        $lastPositionalArg = $argCount > $paramCount ? $paramCount : $argCount;
+        $stack = $this->stack;
+
+        // Bind environment-allocated parameters
+        for ($i = 0; $i < $paramCount; $i++) {
+            $slot = $slots[$i] ?? -1;
+            if ($slot < 0) {
+                $callEnv->define($desc->params[$i], $i < $lastPositionalArg ? $stack[$argsStart + $i] : JsUndefined::Value);
+            }
+        }
+
+        // Bind rest parameter (env-allocated)
+        if ($desc->restParam !== null && $desc->restParamSlot < 0) {
+            $rest = [];
+            if ($argCount > $paramCount) {
+                $restCount = $argCount - $paramCount;
+                $restStart = $argsStart + $paramCount;
+                for ($i = 0; $i < $restCount; $i++) {
+                    $rest[$i] = $stack[$restStart + $i];
+                }
+            }
+            $callEnv->define($desc->restParam, new JsArray($rest));
+        }
+
+        $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv);
+
+        // Set up register file and bind register-allocated parameters
+        if ($desc->regCount > 0) {
+            $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
+            for ($i = 0; $i < $paramCount; $i++) {
+                $slot = $slots[$i] ?? -1;
+                if ($slot >= 0) {
+                    $this->frame->registers[$slot] = $i < $lastPositionalArg ? $stack[$argsStart + $i] : JsUndefined::Value;
+                }
+            }
+
+            // Register-allocated rest param
+            if ($desc->restParam !== null && $desc->restParamSlot >= 0) {
+                $rest = [];
+                if ($argCount > $paramCount) {
+                    $restCount = $argCount - $paramCount;
+                    $restStart = $argsStart + $paramCount;
+                    for ($i = 0; $i < $restCount; $i++) {
+                        $rest[$i] = $stack[$restStart + $i];
+                    }
+                }
+                $this->frame->registers[$desc->restParamSlot] = new JsArray($rest);
+            }
         }
     }
 
@@ -940,15 +1171,17 @@ final class VirtualMachine
         // Bind environment-allocated parameters
         $argCount = count($args);
         $paramCount = count($desc->params);
+        $lastPositionalArg = $argCount > $paramCount ? $paramCount : $argCount;
         for ($i = 0; $i < $paramCount; $i++) {
             if (!isset($desc->paramSlots[$i]) || $desc->paramSlots[$i] < 0) {
-                $callEnv->define($desc->params[$i], $i < $argCount ? $args[$i] : JsUndefined::Value);
+                $callEnv->define($desc->params[$i], $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value);
             }
         }
 
         // Bind rest parameter (env-allocated)
         if ($desc->restParam !== null && $desc->restParamSlot < 0) {
-            $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
+            $rest = $argCount > $paramCount ? array_slice($args, $paramCount) : [];
+            $callEnv->define($desc->restParam, new JsArray($rest));
         }
 
         $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv);
@@ -958,12 +1191,13 @@ final class VirtualMachine
             $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
             for ($i = 0; $i < $paramCount; $i++) {
                 if (isset($desc->paramSlots[$i]) && $desc->paramSlots[$i] >= 0) {
-                    $this->frame->registers[$desc->paramSlots[$i]] = $i < $argCount ? $args[$i] : JsUndefined::Value;
+                    $this->frame->registers[$desc->paramSlots[$i]] = $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value;
                 }
             }
             // Register-allocated rest param
             if ($desc->restParam !== null && $desc->restParamSlot >= 0) {
-                $this->frame->registers[$desc->restParamSlot] = new JsArray(array_slice($args, $paramCount));
+                $rest = $argCount > $paramCount ? array_slice($args, $paramCount) : [];
+                $this->frame->registers[$desc->restParamSlot] = new JsArray($rest);
             }
         }
     }
@@ -972,7 +1206,6 @@ final class VirtualMachine
     {
         $calleeIdx = $this->sp - $argCount - 1;
         $callee    = $this->stack[$calleeIdx];
-
         $args = [];
         for ($i = 0; $i < $argCount; $i++) {
             $args[] = $this->stack[$calleeIdx + 1 + $i];
@@ -993,13 +1226,15 @@ final class VirtualMachine
             $callEnv->define('this', $newObj);
             $ac = count($args);
             $paramCount = count($desc->params);
+            $lastPositionalArg = $ac > $paramCount ? $paramCount : $ac;
             for ($i = 0; $i < $paramCount; $i++) {
                 if (!isset($desc->paramSlots[$i]) || $desc->paramSlots[$i] < 0) {
-                    $callEnv->define($desc->params[$i], $i < $ac ? $args[$i] : JsUndefined::Value);
+                    $callEnv->define($desc->params[$i], $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value);
                 }
             }
             if ($desc->restParam !== null && $desc->restParamSlot < 0) {
-                $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
+                $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                $callEnv->define($desc->restParam, new JsArray($rest));
             }
             $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv, $newObj);
 
@@ -1008,11 +1243,12 @@ final class VirtualMachine
                 $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
                 for ($i = 0; $i < $paramCount; $i++) {
                     if (isset($desc->paramSlots[$i]) && $desc->paramSlots[$i] >= 0) {
-                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $ac ? $args[$i] : JsUndefined::Value;
+                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value;
                     }
                 }
                 if ($desc->restParam !== null && $desc->restParamSlot >= 0) {
-                    $this->frame->registers[$desc->restParamSlot] = new JsArray(array_slice($args, $paramCount));
+                    $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                    $this->frame->registers[$desc->restParamSlot] = new JsArray($rest);
                 }
             }
         } else {
@@ -1121,24 +1357,27 @@ final class VirtualMachine
             $callEnv->define('this', $newObj);
             $ac = count($args);
             $paramCount = count($desc->params);
+            $lastPositionalArg = $ac > $paramCount ? $paramCount : $ac;
             for ($i = 0; $i < $paramCount; $i++) {
                 if (!isset($desc->paramSlots[$i]) || $desc->paramSlots[$i] < 0) {
-                    $callEnv->define($desc->params[$i], $i < $ac ? $args[$i] : JsUndefined::Value);
+                    $callEnv->define($desc->params[$i], $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value);
                 }
             }
             if ($desc->restParam !== null && $desc->restParamSlot < 0) {
-                $callEnv->define($desc->restParam, new JsArray(array_slice($args, $paramCount)));
+                $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                $callEnv->define($desc->restParam, new JsArray($rest));
             }
             $this->pushFrame($desc->ops, $desc->opA, $desc->opB, $desc->constants, $desc->names, $callEnv, $newObj);
             if ($desc->regCount > 0) {
                 $this->frame->registers = array_fill(0, $desc->regCount, JsUndefined::Value);
                 for ($i = 0; $i < $paramCount; $i++) {
                     if (isset($desc->paramSlots[$i]) && $desc->paramSlots[$i] >= 0) {
-                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $ac ? $args[$i] : JsUndefined::Value;
+                        $this->frame->registers[$desc->paramSlots[$i]] = $i < $lastPositionalArg ? $args[$i] : JsUndefined::Value;
                     }
                 }
                 if ($desc->restParam !== null && $desc->restParamSlot >= 0) {
-                    $this->frame->registers[$desc->restParamSlot] = new JsArray(array_slice($args, $paramCount));
+                    $rest = $ac > $paramCount ? array_slice($args, $paramCount) : [];
+                    $this->frame->registers[$desc->restParamSlot] = new JsArray($rest);
                 }
             }
         } else {
@@ -1235,47 +1474,43 @@ final class VirtualMachine
         $handler = array_pop($this->handlers);
 
         // Unwind frames if throw happened inside a called function
-        while ($this->frameCount > $handler['frameCount']) {
+        while ($this->frameCount > $handler[1]) {
             $this->popFrame();
         }
 
         // Restore stack to pre-try state
-        $this->sp = $handler['sp'];
+        $this->sp = $handler[2];
 
         // Push exception value (catch handler will pop it via SetLocal)
         $this->stack[$this->sp++] = $value;
 
         // Restore environment and jump to catch handler
-        $this->frame->env = $handler['env'];
-        $this->frame->ip = $handler['catchIP'];
+        $this->frame->env = $handler[3];
+        $this->frame->ip = $handler[0];
     }
 
     // ──────────────────── Array / Property Operations ────────────────────
 
     private function makeArray(int $count): void
     {
-        $elements = [];
-        // Pop elements in reverse (first pushed = first element)
+        $elements = array_fill(0, $count, null);
         for ($i = $count - 1; $i >= 0; $i--) {
             $elements[$i] = $this->pop();
         }
-        ksort($elements);
         $this->push(new JsArray($elements));
     }
 
     private function makeObject(int $count): void
     {
-        $pairs = [];
-        // Pop key-value pairs in reverse (value on top, then key)
-        for ($i = 0; $i < $count; $i++) {
-            $value = $this->pop();
-            $key = $this->pop();
-            $pairs[] = [(string) $key, $value];
+        $keys = [];
+        $values = [];
+        for ($i = $count - 1; $i >= 0; $i--) {
+            $values[$i] = $this->pop();
+            $keys[$i] = (string) $this->pop();
         }
-        // Reverse so first property is set first (later duplicates overwrite — JS semantics)
         $properties = [];
-        for ($i = count($pairs) - 1; $i >= 0; $i--) {
-            $properties[$pairs[$i][0]] = $pairs[$i][1];
+        for ($i = 0; $i < $count; $i++) {
+            $properties[$keys[$i]] = $values[$i];
         }
         $this->push(new JsObject($properties));
     }
@@ -1307,13 +1542,9 @@ final class VirtualMachine
     private function resolveProperty(mixed $obj, mixed $key): void
     {
         if ($obj instanceof JsArray) {
-            $vm = $this;
-            $invoker = static fn(mixed $fn, array $a): mixed => $vm->invokeFunction($fn, $a);
-            $this->push($obj->get($key, $invoker));
+            $this->push($obj->get($key, $this->callbackInvoker));
         } elseif ($obj instanceof JsObject) {
-            $vm = $this;
-            $invoker = static fn(mixed $fn, array $a): mixed => $vm->invokeFunction($fn, $a);
-            $this->push($obj->get($key, $invoker));
+            $this->push($obj->get($key, $this->callbackInvoker));
         } elseif ($obj instanceof JsDate) {
             $this->push($obj->get($key));
         } elseif ($obj instanceof JsRegex) {
@@ -1327,9 +1558,7 @@ final class VirtualMachine
             if ($key === 'length') {
                 $this->push(mb_strlen($obj));
             } else {
-                $vm = $this;
-                $invoker = static fn(mixed $fn, array $a): mixed => $vm->invokeFunction($fn, $a);
-                $this->push($this->getStringMethod($obj, (string) $key, $invoker));
+                $this->push($this->getStringMethod($obj, (string) $key, $this->callbackInvoker));
             }
         } elseif (is_int($obj) || is_float($obj)) {
             $this->push($this->getNumberMethod($obj, (string) $key));

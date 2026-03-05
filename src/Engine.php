@@ -34,17 +34,75 @@ use ScriptLite\Vm\VirtualMachine;
  */
 final class Engine
 {
+    private const int MAX_COMPILED_CACHE_SIZE = 32;
+    private const int MAX_TRANSPILER_CACHE_SIZE = 32;
+    private const int MAX_TRANSPILER_FILE_CACHE_SIZE = 16;
+    private const int MAX_PARSE_CACHE_SIZE = 12;
+
     private ?VirtualMachine $lastVm = null;
+    private int $cacheSequence = 0;
+
+    /** @var array<string, array{compiled: CompiledScript, touch: int}> */
+    private array $compiledCache = [];
+
+    /** @var array<string, array{phpSource: string, touch: int}> */
+    private array $transpileCache = [];
+
+    /** @var array<string, array<string, int>> [key => ['file' => string, 'touch' => int]] */
+    private array $transpiledFileCache = [];
+
+    /** @var array<string, array{program: \ScriptLite\Ast\Program, touch: int}> */
+    private array $parseCache = [];
+
+    private string $tempDir;
+
+    public function __construct()
+    {
+        $this->tempDir = sys_get_temp_dir();
+    }
 
     /**
      * Parse and compile JS source to bytecode.
      */
     public function compile(string $source): CompiledScript
     {
-        $parser   = new Parser($source);
-        $program  = $parser->parse();
+        $program  = $this->parseSourceCached($source);
         $compiler = new Compiler();
         return $compiler->compile($program);
+    }
+
+    /**
+     * Parse and compile JS source to bytecode with a small LRU cache.
+     */
+    private function compileCached(string $source): CompiledScript
+    {
+        $key = md5($source);
+        if (isset($this->compiledCache[$key])) {
+            $this->compiledCache[$key]['touch'] = ++$this->cacheSequence;
+            return $this->compiledCache[$key]['compiled'];
+        }
+
+        $compiled = $this->compile($source);
+        $this->compiledCache[$key] = [
+            'compiled' => $compiled,
+            'touch' => ++$this->cacheSequence,
+        ];
+
+        if (count($this->compiledCache) > self::MAX_COMPILED_CACHE_SIZE) {
+            $oldestKey = null;
+            $oldestTouch = PHP_INT_MAX;
+            foreach ($this->compiledCache as $cacheKey => $entry) {
+                if ($entry['touch'] < $oldestTouch) {
+                    $oldestTouch = $entry['touch'];
+                    $oldestKey = $cacheKey;
+                }
+            }
+            if ($oldestKey !== null) {
+                unset($this->compiledCache[$oldestKey]);
+            }
+        }
+
+        return $compiled;
     }
 
     /**
@@ -71,7 +129,7 @@ final class Engine
      */
     public function eval(string $source, array $globals = []): mixed
     {
-        return $this->run($this->compile($source), $globals);
+        return $this->run($this->compileCached($source), $globals);
     }
 
     /**
@@ -85,10 +143,39 @@ final class Engine
      */
     public function transpile(string $source, array $globals = []): string
     {
-        $parser  = new Parser($source);
-        $program = $parser->parse();
+        $globalNames = self::extractGlobalNames($globals);
+        $cacheKeySource = $globalNames === []
+            ? $source
+            : $source . "\0" . implode('|', $globalNames);
+        $cacheKey = md5($cacheKeySource);
+        if (isset($this->transpileCache[$cacheKey])) {
+            $this->transpileCache[$cacheKey]['touch'] = ++$this->cacheSequence;
+            return $this->transpileCache[$cacheKey]['phpSource'];
+        }
+
+        $program = $this->parseSourceCached($source);
         $transpiler = new PhpTranspiler();
-        return $transpiler->transpile($program, self::extractGlobalNames($globals));
+        $phpSource = $transpiler->transpile($program, $globalNames);
+        $this->transpileCache[$cacheKey] = [
+            'phpSource' => $phpSource,
+            'touch' => ++$this->cacheSequence,
+        ];
+
+        if (count($this->transpileCache) > self::MAX_TRANSPILER_CACHE_SIZE) {
+            $oldestKey = null;
+            $oldestTouch = PHP_INT_MAX;
+            foreach ($this->transpileCache as $key => $entry) {
+                if ($entry['touch'] < $oldestTouch) {
+                    $oldestTouch = $entry['touch'];
+                    $oldestKey = $key;
+                }
+            }
+            if ($oldestKey !== null) {
+                unset($this->transpileCache[$oldestKey]);
+            }
+        }
+
+        return $phpSource;
     }
 
     /**
@@ -113,14 +200,10 @@ final class Engine
      */
     public function transpileAndEval(string $source, array $globals = [], array $opts = []): mixed
     {
-
-        $opts = array_merge([
-            'use_eval' => false, // if false, uses runTranspiled() to avoid eval() memory leak
-        ], $opts);
-
         $php = $this->transpile($source, $globals);
+        $useEval = (bool) ($opts['use_eval'] ?? false); // if false, uses runTranspiled() to avoid eval() memory leak
 
-        if ($opts['use_eval']) {
+        if ($useEval) {
             return $this->evalTranspiled($php, $globals);
         }
 
@@ -137,14 +220,8 @@ final class Engine
      */
     public function evalTranspiled(string $phpSource, array $globals = []): mixed
     {
-        $__globals = self::normalizeGlobals($globals);
-        set_error_handler(static function (int $errno, string $msg): bool {
-            if (str_contains($msg, 'Undefined variable')) {
-                preg_match('/\$(\w+)/', $msg, $m);
-                throw new \RuntimeException(($m[1] ?? '?') . ' is not defined');
-            }
-            return false; // let other warnings propagate normally
-        }, E_WARNING);
+        $__globals = $globals === [] ? [] : self::normalizeGlobals($globals);
+        set_error_handler([self::class, 'handleUndefinedVariableAsRuntimeException'], E_WARNING);
         try {
             return self::denormalizeValue(eval($phpSource));
         } finally {
@@ -162,22 +239,84 @@ final class Engine
      */
     public function runTranspiled(string $phpSource, array $globals = []): mixed
     {
-        $file = tempnam(sys_get_temp_dir(), 'scriptlite_') . '.php';
-        file_put_contents($file, "<?php\n" . $phpSource);
-        set_error_handler(static function (int $errno, string $msg): bool {
-            if (str_contains($msg, 'Undefined variable')) {
-                preg_match('/\$(\w+)/', $msg, $m);
-                throw new \RuntimeException(($m[1] ?? '?') . ' is not defined');
-            }
-            return false; // let other warnings propagate normally
-        }, E_WARNING);
+        $file = $this->getCachedTranspiledFile($phpSource);
+        set_error_handler([self::class, 'handleUndefinedVariableAsRuntimeException'], E_WARNING);
         try {
-            $__globals = self::normalizeGlobals($globals);
+            $__globals = $globals === [] ? [] : self::normalizeGlobals($globals);
             return self::denormalizeValue(include $file);
         } finally {
             restore_error_handler();
-            @unlink($file);
         }
+    }
+
+    private function getCachedTranspiledFile(string $phpSource): string
+    {
+        $cacheKey = md5($phpSource);
+        if (isset($this->transpiledFileCache[$cacheKey])) {
+            $this->transpiledFileCache[$cacheKey]['touch'] = ++$this->cacheSequence;
+            $existing = $this->transpiledFileCache[$cacheKey]['file'];
+            if (is_file($existing)) {
+                return $existing;
+            }
+            unset($this->transpiledFileCache[$cacheKey]);
+        }
+
+        $file = $this->tempDir . '/scriptlite_cached_' . $cacheKey . '.php';
+        if (!is_file($file)) {
+            file_put_contents($file, "<?php\n" . $phpSource);
+            if (function_exists('opcache_compile_file')) {
+                @opcache_compile_file($file);
+            }
+        }
+
+        $this->transpiledFileCache[$cacheKey] = ['file' => $file, 'touch' => ++$this->cacheSequence];
+
+        if (count($this->transpiledFileCache) > self::MAX_TRANSPILER_FILE_CACHE_SIZE) {
+            $oldestKey = null;
+            $oldestTouch = PHP_INT_MAX;
+            foreach ($this->transpiledFileCache as $key => $entry) {
+                if ($entry['touch'] < $oldestTouch) {
+                    $oldestTouch = $entry['touch'];
+                    $oldestKey = $key;
+                }
+            }
+            if ($oldestKey !== null && isset($this->transpiledFileCache[$oldestKey]['file'])) {
+                @unlink($this->transpiledFileCache[$oldestKey]['file']);
+                unset($this->transpiledFileCache[$oldestKey]);
+            }
+        }
+
+        return $file;
+    }
+
+    private function parseSourceCached(string $source): \ScriptLite\Ast\Program
+    {
+        $key = md5($source);
+        if (isset($this->parseCache[$key])) {
+            $this->parseCache[$key]['touch'] = ++$this->cacheSequence;
+            return $this->parseCache[$key]['program'];
+        }
+
+        $parser = new Parser($source);
+        $program = $parser->parse();
+
+        $this->parseCache[$key] = ['program' => $program, 'touch' => ++$this->cacheSequence];
+
+        if (count($this->parseCache) > self::MAX_PARSE_CACHE_SIZE) {
+            $oldestKey = null;
+            $oldestTouch = PHP_INT_MAX;
+            foreach ($this->parseCache as $cacheKey => $entry) {
+                if ($entry['touch'] < $oldestTouch) {
+                    $oldestTouch = $entry['touch'];
+                    $oldestKey = $cacheKey;
+                }
+            }
+            if ($oldestKey !== null) {
+                unset($this->parseCache[$oldestKey]);
+            }
+        }
+
+        return $program;
     }
 
     /**
@@ -275,6 +414,28 @@ final class Engine
         if ($globals === [] || array_is_list($globals)) {
             return $globals;
         }
-        return array_keys($globals);
+        $globalNames = array_keys($globals);
+        sort($globalNames);
+        return $globalNames;
+    }
+
+    private static function handleUndefinedVariableAsRuntimeException(int $errno, string $msg): bool
+    {
+        if (!str_starts_with($msg, 'Undefined variable')) {
+            return false;
+        }
+
+        $start = strpos($msg, '$');
+        if ($start === false) {
+            throw new \RuntimeException('Undefined variable');
+        }
+
+        $name = substr($msg, $start + 1);
+        $end = strpos($name, ' ');
+        if ($end !== false) {
+            $name = substr($name, 0, $end);
+        }
+
+        throw new \RuntimeException($name . ' is not defined');
     }
 }
