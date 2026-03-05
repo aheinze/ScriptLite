@@ -1,0 +1,24 @@
+{
+    "name": "aheinze/scriptlite-ext",
+    "version": "0.1.0",
+    "description": "C extension for ScriptLite — high-performance ECMAScript interpreter with embedded parser runtime",
+    "type": "php-ext",
+    "license": "MIT",
+    "homepage": "https://github.com/aheinze/ScriptLiteExt",
+    "require": {
+        "php": ">=8.3"
+    },
+    "php-ext": {
+        "extension-name": "scriptlite",
+        "configure-options": [
+            {
+                "name": "enable-scriptlite",
+                "description": "Enable the ScriptLite extension"
+            }
+        ]
+    },
+    "support": {
+        "issues": "https://github.com/aheinze/ScriptLiteExt/issues",
+        "source": "https://github.com/aheinze/ScriptLiteExt"
+    }
+}

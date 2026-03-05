@@ -1,0 +1,27 @@
+# Build artifacts (phpize/make output)
+.libs/
+autom4te.cache/
+build/
+modules/
+configure
+configure~
+configure.ac
+config.h
+config.h.in
+config.h.in~
+config.log
+config.nice
+config.status
+libtool
+Makefile
+Makefile.fragments
+Makefile.objects
+run-tests.php
+*.lo
+*.la
+*.dep
+*.o
+
+# OS files
+.DS_Store
+Thumbs.db

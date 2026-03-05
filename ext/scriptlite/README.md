@@ -1,62 +1,31 @@
-# ScriptLite C Extension Build Guide
+# ScriptLite C Extension
 
-This folder contains the native `scriptlite` PHP extension.
+> **Mirror repository** — this repo is automatically mirrored from [aheinze/ScriptLite](https://github.com/aheinze/ScriptLite) for PHP PIE installation. All development, issues, and pull requests happen in the [main repository](https://github.com/aheinze/ScriptLite).
 
-## Prerequisites
+High-performance PHP extension for the [ScriptLite](https://github.com/aheinze/ScriptLite) ECMAScript interpreter. Replaces the PHP bytecode VM with a C implementation using computed-goto dispatch, delivering ~120x speedup.
 
-- PHP CLI + development package for the same version you will run
-- `phpize` and `php-config` from that same PHP install
-- C compiler with C11 support (`gcc` or `clang`)
-- PCRE2 development library (`libpcre2-8` / `libpcre2-dev`)
-- `make`
+The extension embeds the parser runtime — no Composer autoloader or PHP library required at runtime.
 
-Quick sanity check:
+## Installation
+
+### Via PHP PIE (recommended)
 
 ```bash
-php -v
-phpize -v
-php-config --version
+pie install aheinze/scriptlite-ext
 ```
 
-`php`, `phpize`, and `php-config` should point to the same PHP version.
+### Manual build
 
-## Build
-
-From repository root:
+Prerequisites: PHP 8.3+ dev headers, `phpize`, C11 compiler, `libpcre2-dev`, `make`.
 
 ```bash
-cd ext/scriptlite
 phpize
 ./configure --enable-scriptlite
 make -j"$(nproc)"
-```
-
-Build artifact:
-
-- `ext/scriptlite/modules/scriptlite.so`
-
-## Load The Extension
-
-One-off CLI run:
-
-```bash
-php -d extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so -m | grep scriptlite
-```
-
-Persistent load (recommended via `conf.d`):
-
-```bash
-echo "extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so" > /path/to/php/conf.d/50-scriptlite.ini
-```
-
-Or install to `extension_dir`:
-
-```bash
-cd ext/scriptlite
 make install
 ```
 
-Then enable with:
+Then enable:
 
 ```ini
 extension=scriptlite
@@ -66,47 +35,56 @@ extension=scriptlite
 
 ```bash
 php -r "var_dump(extension_loaded('scriptlite'));"
+# bool(true)
+
+php -r "echo (new ScriptLiteExt\Engine())->eval('1 + 2');"
+# 3
 ```
 
-Expected output:
+## Usage
 
-```text
-bool(true)
+### Standalone (no PHP library needed)
+
+```php
+$engine = new ScriptLiteExt\Engine();
+$result = $engine->eval('Math.max(1, 2, 3)');
+echo $result; // 3
 ```
 
-## Run Project Tests With Native Backend
+### With ScriptLite PHP library
 
-When the extension is loaded, it exposes `ScriptLiteExt\Engine` for the extension frontend.
-This avoids class-name conflicts with the userland `ScriptLite\Engine` from `src/Engine.php`
-when both are present in the same process.
+When installed alongside `aheinze/ScriptLite`, the PHP `Engine` class automatically delegates to the C extension — no code changes needed.
 
-```bash
-php -d extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so -r "new ScriptLiteExt\Engine(); echo class_exists('ScriptLiteExt\\Engine', false) ? 'yes' : 'no';"
+```php
+$engine = new ScriptLite\Engine();
+$result = $engine->eval('Math.max(1, 2, 3)'); // uses C extension transparently
 ```
 
-The parser runtime is embedded in the extension binary so no separate `parser_runtime`
-sources are required at runtime.
+## API
 
-From repository root:
+### `ScriptLiteExt\Engine`
 
-```bash
-php run-tests.php
-```
+| Method | Description |
+|--------|-------------|
+| `eval(string $code, array $globals = []): mixed` | Evaluate JS code and return the result |
+| `compile(string $code): CompiledScript` | Compile JS to bytecode |
+| `run(CompiledScript $script, array $globals = []): mixed` | Execute compiled bytecode |
+| `transpile(string $code): string` | Transpile JS to PHP code |
+| `getOutput(): string` | Get captured `console.log` output |
 
-Or run only the extension-loaded PHPUnit phase:
+### `ScriptLiteExt\Compiler`
 
-```bash
-php -d extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so vendor/bin/phpunit
-```
+| Method | Description |
+|--------|-------------|
+| `compile(Program $ast): CompiledScript` | Compile an AST to bytecode |
 
-## Rebuild Notes
+### `ScriptLiteExt\VirtualMachine`
 
-- Rebuild whenever C sources change:
+| Method | Description |
+|--------|-------------|
+| `execute(CompiledScript $script, array $globals = []): mixed` | Execute compiled bytecode |
+| `getOutput(): string` | Get captured `console.log` output |
 
-```bash
-cd ext/scriptlite
-make clean
-make -j"$(nproc)"
-```
+## License
 
-- Rebuild whenever PHP minor version changes (for example, 8.3 -> 8.4).
+MIT
