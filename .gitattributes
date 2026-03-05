@@ -1,0 +1,7 @@
+# Exclude non-essential files from Composer dist archives
+/tests/             export-ignore
+/bench.php          export-ignore
+/ext/               export-ignore
+/phpunit.xml        export-ignore
+/.gitignore         export-ignore
+/.gitattributes     export-ignore
