@@ -6,7 +6,7 @@ require __DIR__ . '/vendor/autoload.php';
 
 use ScriptLite\Engine;
 
-$hasNative = extension_loaded('scriptlite');
+$hasNative = extension_loaded('scriptlite') && class_exists(\ScriptLiteExt\Engine::class, false);
 $iterations = 30;
 
 // ── JS benchmark scripts ──
@@ -510,7 +510,7 @@ $allOk = $match && $trMatch && $objMatch && $objTrMatch;
 
 echo "\n";
 echo "  ScriptLite Benchmark\n";
-echo "  PHP " . PHP_VERSION . " | {$iterations} iterations | C extension: " . ($hasNative ? 'loaded' : 'not loaded') . "\n";
+echo "  PHP " . PHP_VERSION . " | {$iterations} iterations | C extension (ScriptLiteExt): " . ($hasNative ? 'loaded' : 'not loaded') . "\n";
 echo "\n";
 
 // ── KPIs ──

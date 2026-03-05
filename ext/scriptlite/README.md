@@ -76,7 +76,24 @@ bool(true)
 
 ## Run Project Tests With Native Backend
 
+When the extension is loaded, it exposes `ScriptLiteExt\Engine` for the extension frontend.
+This avoids class-name conflicts with the userland `ScriptLite\Engine` from `src/Engine.php`
+when both are present in the same process.
+
+```bash
+php -d extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so -r "new ScriptLiteExt\Engine(); echo class_exists('ScriptLiteExt\\Engine', false) ? 'yes' : 'no';"
+```
+
+The parser runtime is embedded in the extension binary so no separate `parser_runtime`
+sources are required at runtime.
+
 From repository root:
+
+```bash
+php run-tests.php
+```
+
+Or run only the extension-loaded PHPUnit phase:
 
 ```bash
 php -d extension=/absolute/path/to/ext/scriptlite/modules/scriptlite.so vendor/bin/phpunit

@@ -19,5 +19,13 @@
         "psr-4": {
             "ScriptLite\\Tests\\": "tests/"
         }
+    },
+    "scripts": {
+        "build:ext": "cd ext/scriptlite && phpize && ./configure --enable-scriptlite && make -j$(nproc)",
+        "test": "php run-tests.php",
+        "test:php": "php vendor/bin/phpunit tests/",
+        "test:ext": "php -d extension=ext/scriptlite/modules/scriptlite.so vendor/bin/phpunit tests/",
+        "bench": "php bench.php",
+        "bench:ext": "php -d extension=ext/scriptlite/modules/scriptlite.so bench.php"
     }
 }

@@ -11,6 +11,10 @@ bool sl_ast_cache_init(void) {
         return true;
     }
 
+    if (!sl_scriptlite_bootstrap_parser_runtime()) {
+        return false;
+    }
+
     zend_class_entry *ce;
     sl_ast_class_cache *cache = &SL_G(ast_cache);
 

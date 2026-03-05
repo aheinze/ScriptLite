@@ -484,6 +484,10 @@ static void sl_vm_do_new(sl_vm *vm, uint32_t argc) {
         sl_js_object *new_obj = sl_object_new();
         new_obj->constructor = callee.u.closure;
         SL_GC_ADDREF(callee.u.closure);
+        new_obj->prototype = sl_closure_get_prototype(callee.u.closure, true);
+        if (new_obj->prototype) {
+            SL_GC_ADDREF(new_obj->prototype);
+        }
 
         sl_vm_call_closure(vm, callee.u.closure, args, argc, new_obj);
     } else {
@@ -1629,6 +1633,10 @@ static sl_value sl_vm_run(sl_vm *vm) {
             sl_js_object *new_obj = sl_object_new();
             new_obj->constructor = callee.u.closure;
             SL_GC_ADDREF(callee.u.closure);
+            new_obj->prototype = sl_closure_get_prototype(callee.u.closure, true);
+            if (new_obj->prototype) {
+                SL_GC_ADDREF(new_obj->prototype);
+            }
 
             vm->sp = sp;
             SYNC_STATE();

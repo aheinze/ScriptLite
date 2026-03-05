@@ -158,5 +158,8 @@ ZEND_EXTERN_MODULE_GLOBALS(scriptlite)
 extern zend_class_entry *ce_sl_compiled_script;
 extern zend_class_entry *ce_sl_compiler;
 extern zend_class_entry *ce_sl_virtual_machine;
+extern zend_class_entry *ce_sl_engine;
+
+bool sl_scriptlite_bootstrap_parser_runtime(void);
 
 #endif /* PHP_SCRIPTLITE_H */

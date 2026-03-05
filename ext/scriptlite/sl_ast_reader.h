@@ -5,6 +5,7 @@
 
 /* Initialize AST class entry cache -- called at RINIT (first use) */
 bool sl_ast_cache_init(void);
+bool sl_scriptlite_bootstrap_parser_runtime(void);
 
 /* Read a property from an AST node object */
 static inline zval *sl_ast_prop(zval *obj, zend_string *prop_name) {

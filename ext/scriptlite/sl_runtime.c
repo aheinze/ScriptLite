@@ -166,6 +166,38 @@ static void sl_object_props_dtor(zval *zv) {
     efree(v);
 }
 
+static sl_value sl_props_get(HashTable *props, zend_string *key) {
+    if (!props) {
+        return sl_val_undefined();
+    }
+    zval *found = zend_hash_find(props, key);
+    if (!found) {
+        return sl_val_undefined();
+    }
+    sl_value sv = *(sl_value*)Z_PTR_P(found);
+    return sl_value_copy(sv);
+}
+
+static bool sl_props_set(HashTable **props_ptr, zend_string *key, sl_value val) {
+    if (!*props_ptr) {
+        ALLOC_HASHTABLE(*props_ptr);
+        zend_hash_init(*props_ptr, 8, NULL, sl_object_props_dtor, 0);
+    }
+
+    sl_value *sv = emalloc(sizeof(sl_value));
+    *sv = val;
+    SL_ADDREF(val);
+
+    zval zv;
+    ZVAL_PTR(&zv, sv);
+    if (!zend_hash_update(*props_ptr, key, &zv)) {
+        SL_DELREF(*sv);
+        efree(sv);
+        return false;
+    }
+    return true;
+}
+
 sl_js_object *sl_object_new(void) {
     sl_js_object *obj = emalloc(sizeof(sl_js_object));
     obj->gc.refcount = 1;
@@ -272,6 +304,7 @@ sl_js_closure *sl_closure_new(sl_func_descriptor *desc, sl_environment *env) {
     if (env) {
         SL_GC_ADDREF(env);
     }
+    c->properties = NULL;
     return c;
 }
 
@@ -282,7 +315,73 @@ void sl_closure_free(sl_js_closure *c) {
     if (c->captured_env && SL_GC_DELREF(c->captured_env) == 0) {
         sl_env_free(c->captured_env);
     }
+    if (c->properties) {
+        zend_hash_destroy(c->properties);
+        FREE_HASHTABLE(c->properties);
+    }
     efree(c);
+}
+
+sl_js_object *sl_closure_get_prototype(sl_js_closure *closure, bool create_if_missing) {
+    zend_string *prototype_key = SL_G(str_prototype);
+    bool release_prototype_key = false;
+    if (!prototype_key) {
+        prototype_key = zend_string_init("prototype", sizeof("prototype") - 1, 0);
+        release_prototype_key = true;
+    }
+
+    sl_value existing = sl_props_get(closure->properties, prototype_key);
+    if (existing.tag == SL_TAG_OBJECT) {
+        sl_js_object *obj = existing.u.obj;
+        SL_DELREF(existing);
+        if (release_prototype_key) {
+            zend_string_release(prototype_key);
+        }
+        return obj;
+    }
+    if (existing.tag != SL_TAG_UNDEFINED) {
+        SL_DELREF(existing);
+    }
+
+    if (!create_if_missing) {
+        if (release_prototype_key) {
+            zend_string_release(prototype_key);
+        }
+        return NULL;
+    }
+
+    sl_js_object *proto = sl_object_new();
+
+    zend_string *constructor_key = SL_G(str_constructor);
+    bool release_constructor_key = false;
+    if (!constructor_key) {
+        constructor_key = zend_string_init("constructor", sizeof("constructor") - 1, 0);
+        release_constructor_key = true;
+    }
+
+    sl_object_set(proto, constructor_key, sl_val_closure(closure));
+    if (release_constructor_key) {
+        zend_string_release(constructor_key);
+    }
+
+    if (!sl_props_set(&closure->properties, prototype_key, sl_val_object(proto))) {
+        if (SL_GC_DELREF(proto) == 0) {
+            sl_object_free(proto);
+        }
+        if (release_prototype_key) {
+            zend_string_release(prototype_key);
+        }
+        return NULL;
+    }
+
+    if (release_prototype_key) {
+        zend_string_release(prototype_key);
+    }
+    if (SL_GC_DELREF(proto) == 0) {
+        sl_object_free(proto);
+        return NULL;
+    }
+    return proto;
 }
 
 /* ============================================================
@@ -951,6 +1050,35 @@ sl_value sl_get_property(sl_vm *vm, sl_value target, sl_value key) {
             }
             return sl_val_undefined();
         }
+        case SL_TAG_CLOSURE: {
+            if (key.tag != SL_TAG_STRING) {
+                return sl_val_undefined();
+            }
+
+            if (zend_string_equals_literal(key.u.str, "length")) {
+                return sl_val_int((zend_long)target.u.closure->descriptor->param_count);
+            }
+            if (zend_string_equals_literal(key.u.str, "name")) {
+                zend_string *name = target.u.closure->descriptor->name
+                    ? target.u.closure->descriptor->name
+                    : ZSTR_EMPTY_ALLOC();
+                return sl_val_string(zend_string_copy(name));
+            }
+            if (zend_string_equals_literal(key.u.str, "prototype")) {
+                sl_value existing = sl_props_get(target.u.closure->properties, key.u.str);
+                if (existing.tag != SL_TAG_UNDEFINED) {
+                    return existing;
+                }
+                sl_js_object *prototype = sl_closure_get_prototype(target.u.closure, true);
+                if (!prototype) {
+                    return sl_val_undefined();
+                }
+                sl_value result = sl_val_object(prototype);
+                return sl_value_copy(result);
+            }
+
+            return sl_props_get(target.u.closure->properties, key.u.str);
+        }
         case SL_TAG_INT:
         case SL_TAG_DOUBLE: {
             if (key.tag == SL_TAG_STRING) {
@@ -1014,6 +1142,26 @@ void sl_set_property(sl_vm *vm, sl_value target, sl_value key, sl_value val) {
         case SL_TAG_REGEX: {
             if (key.tag == SL_TAG_STRING && zend_string_equals_literal(key.u.str, "lastIndex")) {
                 target.u.regex->last_index = (zend_long)sl_to_number(val);
+            }
+            break;
+        }
+        case SL_TAG_NATIVE:
+        case SL_TAG_CLOSURE: {
+            zend_string *skey;
+            bool release_skey = false;
+            if (key.tag == SL_TAG_STRING) {
+                skey = key.u.str;
+            } else {
+                skey = sl_to_js_string(key);
+                release_skey = true;
+            }
+            if (target.tag == SL_TAG_NATIVE) {
+                sl_props_set(&target.u.native->properties, skey, val);
+            } else {
+                sl_props_set(&target.u.closure->properties, skey, val);
+            }
+            if (release_skey) {
+                zend_string_release(skey);
             }
             break;
         }

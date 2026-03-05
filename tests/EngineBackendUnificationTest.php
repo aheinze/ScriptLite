@@ -47,8 +47,21 @@ final class EngineBackendUnificationTest extends ScriptLiteTestCase
         }
 
         $compiled = $this->engine->compile('40 + 2', Engine::BACKEND_NATIVE);
-        self::assertInstanceOf(\ScriptLiteNative\CompiledScript::class, $compiled);
+        self::assertInstanceOf(\ScriptLiteExt\CompiledScript::class, $compiled);
         self::assertSame(42, $this->engine->run($compiled));
+    }
+
+    public function testExplicitExtensionEngineSelectionWhenAvailable(): void
+    {
+        if (!extension_loaded('scriptlite') || !class_exists(\ScriptLiteExt\Engine::class, false)) {
+            self::markTestSkipped('Requires ScriptLiteExt\\Engine.');
+        }
+
+        $engine = new Engine(true);
+        $compiled = $engine->compile('40 + 2', Engine::BACKEND_NATIVE);
+        self::assertInstanceOf(\ScriptLiteExt\CompiledScript::class, $compiled);
+        self::assertSame(42, $engine->run($compiled));
+        self::assertSame(42, $engine->eval('40 + 2', [], Engine::BACKEND_NATIVE));
     }
 
     public function testUnsupportedBackendThrows(): void

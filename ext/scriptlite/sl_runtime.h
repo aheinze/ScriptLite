@@ -51,10 +51,12 @@ struct _sl_js_closure {
     sl_gc_header gc;
     sl_func_descriptor *descriptor;
     sl_environment     *captured_env;
+    HashTable          *properties; /* function-as-object props (e.g. prototype) */
 };
 
 sl_js_closure *sl_closure_new(sl_func_descriptor *desc, sl_environment *env);
 void sl_closure_free(sl_js_closure *c);
+sl_js_object *sl_closure_get_prototype(sl_js_closure *closure, bool create_if_missing);
 
 /* ---- Native Function ---- */
 typedef sl_value (*sl_native_handler)(sl_vm *vm, sl_value *args, int argc);
