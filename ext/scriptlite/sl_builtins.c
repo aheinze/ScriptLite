@@ -596,6 +596,7 @@ static sl_value sl_date_constructor_handler(sl_vm *vm, sl_value *args, int argc)
             zend_string *str = args[0].u.str;
             /* Use PHP's strtotime */
             zval ret, arg;
+            ZVAL_UNDEF(&ret);
             ZVAL_STR_COPY(&arg, str);
 
             zval func_name;
@@ -605,8 +606,10 @@ static sl_value sl_date_constructor_handler(sl_vm *vm, sl_value *args, int argc)
                 zval_ptr_dtor(&arg);
                 if (Z_TYPE(ret) == IS_LONG) {
                     double ts = (double)Z_LVAL(ret) * 1000.0;
+                    zval_ptr_dtor(&ret);
                     return sl_val_date(sl_date_new(ts));
                 }
+                zval_ptr_dtor(&ret);
                 return sl_val_date(sl_date_new(NAN));
             }
             zval_ptr_dtor(&func_name);
@@ -650,6 +653,7 @@ static sl_value sl_date_parse_handler(sl_vm *vm, sl_value *args, int argc) {
     }
     zend_string *str = args[0].u.str;
     zval ret, arg;
+    ZVAL_UNDEF(&ret);
     ZVAL_STR_COPY(&arg, str);
 
     zval func_name;
@@ -658,8 +662,11 @@ static sl_value sl_date_parse_handler(sl_vm *vm, sl_value *args, int argc) {
         zval_ptr_dtor(&func_name);
         zval_ptr_dtor(&arg);
         if (Z_TYPE(ret) == IS_LONG) {
-            return sl_val_double((double)Z_LVAL(ret) * 1000.0);
+            double ts = (double)Z_LVAL(ret) * 1000.0;
+            zval_ptr_dtor(&ret);
+            return sl_val_double(ts);
         }
+        zval_ptr_dtor(&ret);
         return sl_val_double(NAN);
     }
     zval_ptr_dtor(&func_name);

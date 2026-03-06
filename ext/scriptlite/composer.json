@@ -1,6 +1,6 @@
 {
     "name": "aheinze/scriptlite-ext",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "C extension for ScriptLite — high-performance ECMAScript interpreter with embedded parser runtime",
     "type": "php-ext",
     "license": "MIT",

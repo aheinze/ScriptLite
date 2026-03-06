@@ -590,7 +590,7 @@ sl_value sl_regex_exec(sl_js_regex *r, zend_string *str, sl_vm *vm) {
 
     if (!result->properties) {
         ALLOC_HASHTABLE(result->properties);
-        zend_hash_init(result->properties, 2, NULL, NULL, 0);
+        zend_hash_init(result->properties, 2, NULL, sl_object_props_dtor, 0);
     }
 
     sl_value *idx_v = emalloc(sizeof(sl_value));

@@ -1382,18 +1382,27 @@ static sl_value sl_vm_run(sl_vm *vm) {
 
     TARGET(SL_OP_PUSH_SCOPE): {
         sl_environment *new_env = sl_env_extend(env);
-        /* env_extend creates with refcount=1 and parent gets addref.
-         * We need to track this new env. Release old env ref if needed. */
+        /* Keep frame->env synchronized with lexical scope transitions.
+         * Transfer ownership of new_env's initial ref directly to frame->env. */
+        if (SL_GC_DELREF(frame->env) == 0) {
+            sl_env_free(frame->env);
+        }
+        frame->env = new_env;
         env = new_env;
         DISPATCH();
     }
 
     TARGET(SL_OP_POP_SCOPE): {
-        sl_environment *parent = env->parent;
-        SL_GC_ADDREF(parent);
-        if (SL_GC_DELREF(env) == 0) {
-            sl_env_free(env);
+        if (!env->parent) {
+            DISPATCH();
         }
+        sl_environment *parent = env->parent;
+        /* New frame owner reference for parent scope. */
+        SL_GC_ADDREF(parent);
+        if (SL_GC_DELREF(frame->env) == 0) {
+            sl_env_free(frame->env);
+        }
+        frame->env = parent;
         env = parent;
         DISPATCH();
     }
@@ -1890,9 +1899,27 @@ sl_value sl_vm_execute(sl_vm *vm, sl_compiled_script *script) {
         sl_vm_create_global_env(vm);
     }
 
+    uint32_t base_frame_count = vm->frame_count;
+    uint32_t base_handler_count = vm->handler_count;
+    uint32_t base_sp = vm->sp;
+
     sl_vm_push_frame(vm, script->main, vm->global_env, NULL);
 
-    return sl_vm_run(vm);
+    sl_value result = sl_vm_run(vm);
+
+    /* Ensure top-level execute never leaks VM state across runs. */
+    while (vm->frame_count > base_frame_count) {
+        sl_vm_pop_frame(vm);
+    }
+    while (vm->handler_count > base_handler_count) {
+        sl_exception_handler *h = &vm->handlers[--vm->handler_count];
+        if (SL_GC_DELREF(h->env) == 0) {
+            sl_env_free(h->env);
+        }
+    }
+    vm->sp = base_sp;
+
+    return result;
 }
 
 /* ================================================================
@@ -1920,6 +1947,8 @@ sl_value sl_vm_invoke_function(sl_vm *vm, sl_value callee, sl_value *args, uint3
      * stop: it must halt when frame_count drops back to this level. */
     uint32_t saved_frame_count = vm->frame_count;
     uint32_t saved_invoke_base = vm->invoke_base_frame;
+    uint32_t saved_handler_count = vm->handler_count;
+    uint32_t saved_sp = vm->sp;
 
     sl_vm_push_frame(vm, desc, call_env, NULL);
 
@@ -1936,6 +1965,22 @@ sl_value sl_vm_invoke_function(sl_vm *vm, sl_value callee, sl_value *args, uint3
     sl_value result = sl_vm_run(vm);
     vm->invoke_depth--;
     vm->invoke_base_frame = saved_invoke_base;
+
+    /* Defensive cleanup for abnormal control-flow paths. */
+    while (vm->frame_count > saved_frame_count) {
+        sl_vm_pop_frame(vm);
+    }
+    while (vm->handler_count > saved_handler_count) {
+        sl_exception_handler *h = &vm->handlers[--vm->handler_count];
+        if (SL_GC_DELREF(h->env) == 0) {
+            sl_env_free(h->env);
+        }
+    }
+    while (vm->sp > saved_sp) {
+        vm->sp--;
+        SL_DELREF(vm->stack[vm->sp]);
+    }
+
     return result;
 }
 
@@ -1944,6 +1989,13 @@ sl_value sl_vm_invoke_function(sl_vm *vm, sl_value callee, sl_value *args, uint3
  * ================================================================ */
 
 void sl_vm_create_global_env(sl_vm *vm) {
+    if (vm->global_env) {
+        if (SL_GC_DELREF(vm->global_env) == 0) {
+            sl_env_free(vm->global_env);
+        }
+        vm->global_env = NULL;
+    }
+
     sl_environment *env = sl_env_new(NULL);
     vm->global_env = env;
     sl_builtins_setup(vm, env);

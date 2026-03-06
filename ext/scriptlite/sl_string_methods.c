@@ -18,6 +18,13 @@
 
 #include "ext/pcre/php_pcre.h"
 
+/* Array/string method property values are stored as sl_value* pointers in zvals. */
+static void sl_method_props_dtor(zval *zv) {
+    sl_value *v = (sl_value*)Z_PTR_P(zv);
+    SL_DELREF(*v);
+    efree(v);
+}
+
 /* ============================================================
  * UTF-8 helpers
  * ============================================================ */
@@ -699,7 +706,7 @@ static sl_value sl_str_match(sl_vm *vm, sl_value *args, int argc) {
     /* Set index and input properties */
     if (!result->properties) {
         ALLOC_HASHTABLE(result->properties);
-        zend_hash_init(result->properties, 4, NULL, NULL, 0);
+        zend_hash_init(result->properties, 4, NULL, sl_method_props_dtor, 0);
     }
     zend_long char_index = sl_byte_to_char_index(ZSTR_VAL(str), ZSTR_LEN(str), ovector[0]);
     sl_value *idx_val = emalloc(sizeof(sl_value));
@@ -759,7 +766,7 @@ static sl_value sl_str_matchAll(sl_vm *vm, sl_value *args, int argc) {
         /* Set index and input properties */
         if (!entry->properties) {
             ALLOC_HASHTABLE(entry->properties);
-            zend_hash_init(entry->properties, 4, NULL, NULL, 0);
+            zend_hash_init(entry->properties, 4, NULL, sl_method_props_dtor, 0);
         }
         zend_long char_index = sl_byte_to_char_index(ZSTR_VAL(str), ZSTR_LEN(str), ovector[0]);
         sl_value *idx_val = emalloc(sizeof(sl_value));

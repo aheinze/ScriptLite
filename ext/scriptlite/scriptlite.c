@@ -865,6 +865,7 @@ PHP_METHOD(ScriptLiteExt_VirtualMachine, execute) {
     ZEND_PARSE_PARAMETERS_END();
 
     sl_compiled_script *script = NULL;
+    bool owns_compiled_script = false;
 
     if (Z_TYPE_P(input_zval) == IS_OBJECT && Z_OBJCE_P(input_zval) == ce_sl_compiled_script) {
         sl_compiled_script_obj *script_obj = sl_compiled_script_from_obj(Z_OBJ_P(input_zval));
@@ -879,6 +880,7 @@ PHP_METHOD(ScriptLiteExt_VirtualMachine, execute) {
         if (!script) {
             RETURN_THROWS();
         }
+        owns_compiled_script = true;
     } else {
         zend_throw_exception(zend_ce_type_error,
             "Argument #1 must be ScriptLiteExt\\CompiledScript or source string", 0);
@@ -904,6 +906,17 @@ PHP_METHOD(ScriptLiteExt_VirtualMachine, execute) {
 
     /* Execute */
     sl_value result = sl_vm_execute(vm, script);
+
+    if (owns_compiled_script && script) {
+        if (SL_GC_DELREF(script) == 0) {
+            sl_compiled_script_free(script);
+        }
+    }
+
+    if (EG(exception)) {
+        SL_DELREF(result);
+        RETURN_THROWS();
+    }
 
     /* Convert result to PHP zval */
     sl_value_to_zval(&result, return_value);
