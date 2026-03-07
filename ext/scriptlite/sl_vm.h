@@ -4,6 +4,8 @@
 #include "sl_environment.h"
 #include "ext/standard/php_smart_string.h"
 
+#define SL_INLINE_FRAME_REGS 8
+
 /* ---- Call Frame ---- */
 typedef struct _sl_call_frame {
     sl_func_descriptor *desc;
@@ -13,6 +15,8 @@ typedef struct _sl_call_frame {
     sl_js_object       *construct_target;
     sl_value           *registers;
     uint32_t            reg_count;
+    zend_bool           using_inline_registers;
+    sl_value            inline_registers[SL_INLINE_FRAME_REGS];
 } sl_call_frame;
 
 /* ---- Exception Handler ---- */

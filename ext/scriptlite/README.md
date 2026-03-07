@@ -2,9 +2,9 @@
 
 > **Mirror repository** — this repo is automatically mirrored from [aheinze/ScriptLite](https://github.com/aheinze/ScriptLite) for PHP PIE installation. All development, issues, and pull requests happen in the [main repository](https://github.com/aheinze/ScriptLite).
 
-High-performance PHP extension for the [ScriptLite](https://github.com/aheinze/ScriptLite) ECMAScript interpreter. Replaces the PHP bytecode VM with a C implementation using computed-goto dispatch, delivering ~120x speedup.
+High-performance PHP extension for the [ScriptLite](https://github.com/aheinze/ScriptLite) ECMAScript interpreter. Replaces the PHP bytecode VM with a C implementation using computed-goto dispatch, delivering ~180x speedup.
 
-The extension embeds the parser runtime — no Composer autoloader or PHP library required at runtime.
+The extension ships with a native C parser only (no PHP parser fallback), so no Composer autoloader or external PHP parser runtime is required at runtime.
 
 ## Installation
 

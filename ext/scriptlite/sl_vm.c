@@ -23,15 +23,23 @@
 static inline void sl_vm_ensure_stack(sl_vm *vm, uint32_t needed) {
     if (EXPECTED(needed <= vm->stack_capacity)) return;
     uint32_t new_cap = vm->stack_capacity;
-    while (new_cap < needed) new_cap *= 2;
-    vm->stack = erealloc(vm->stack, sizeof(sl_value) * new_cap);
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite VM stack capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    vm->stack = safe_erealloc(vm->stack, new_cap, sizeof(sl_value), 0);
     vm->stack_capacity = new_cap;
 }
 
 static inline void sl_vm_ensure_handlers(sl_vm *vm) {
     if (EXPECTED(vm->handler_count < vm->handler_capacity)) return;
+    if (UNEXPECTED(vm->handler_capacity > UINT32_MAX / 2)) {
+        zend_error_noreturn(E_ERROR, "ScriptLite VM handler capacity overflow");
+    }
     vm->handler_capacity *= 2;
-    vm->handlers = erealloc(vm->handlers, sizeof(sl_exception_handler) * vm->handler_capacity);
+    vm->handlers = safe_erealloc(vm->handlers, vm->handler_capacity, sizeof(sl_exception_handler), 0);
 }
 
 /* ================================================================
@@ -42,15 +50,15 @@ sl_vm *sl_vm_new(void) {
     sl_vm *vm = ecalloc(1, sizeof(sl_vm));
 
     vm->stack_capacity = SL_INITIAL_STACK;
-    vm->stack = emalloc(sizeof(sl_value) * vm->stack_capacity);
+    vm->stack = safe_emalloc(vm->stack_capacity, sizeof(sl_value), 0);
     vm->sp = 0;
 
     vm->frame_capacity = 64;
-    vm->frames = emalloc(sizeof(sl_call_frame) * vm->frame_capacity);
+    vm->frames = safe_emalloc(vm->frame_capacity, sizeof(sl_call_frame), 0);
     vm->frame_count = 0;
 
     vm->handler_capacity = 16;
-    vm->handlers = emalloc(sizeof(sl_exception_handler) * vm->handler_capacity);
+    vm->handlers = safe_emalloc(vm->handler_capacity, sizeof(sl_exception_handler), 0);
     vm->handler_count = 0;
 
     memset(&vm->output, 0, sizeof(smart_string));
@@ -75,7 +83,9 @@ void sl_vm_free(sl_vm *vm) {
             for (uint32_t j = 0; j < vm->frames[i].reg_count; j++) {
                 SL_DELREF(vm->frames[i].registers[j]);
             }
-            efree(vm->frames[i].registers);
+            if (!vm->frames[i].using_inline_registers) {
+                efree(vm->frames[i].registers);
+            }
         }
     }
     efree(vm->frames);
@@ -108,8 +118,11 @@ void sl_vm_free(sl_vm *vm) {
 void sl_vm_push_frame(sl_vm *vm, sl_func_descriptor *desc, sl_environment *env,
                       sl_js_object *construct_target) {
     if (UNEXPECTED(vm->frame_count >= vm->frame_capacity)) {
+        if (UNEXPECTED(vm->frame_capacity > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite VM frame capacity overflow");
+        }
         vm->frame_capacity *= 2;
-        vm->frames = erealloc(vm->frames, sizeof(sl_call_frame) * vm->frame_capacity);
+        vm->frames = safe_erealloc(vm->frames, vm->frame_capacity, sizeof(sl_call_frame), 0);
     }
 
     sl_call_frame *f = &vm->frames[vm->frame_count];
@@ -121,11 +134,17 @@ void sl_vm_push_frame(sl_vm *vm, sl_func_descriptor *desc, sl_environment *env,
     f->construct_target = construct_target;
     f->registers = NULL;
     f->reg_count = 0;
+    f->using_inline_registers = 0;
 
     /* Allocate register file */
     if (desc->reg_count > 0) {
         f->reg_count = desc->reg_count;
-        f->registers = emalloc(sizeof(sl_value) * desc->reg_count);
+        if (desc->reg_count <= SL_INLINE_FRAME_REGS) {
+            f->registers = f->inline_registers;
+            f->using_inline_registers = 1;
+        } else {
+            f->registers = safe_emalloc(desc->reg_count, sizeof(sl_value), 0);
+        }
         for (uint32_t i = 0; i < desc->reg_count; i++) {
             f->registers[i] = sl_val_undefined();
         }
@@ -143,9 +162,12 @@ static inline void sl_vm_pop_frame(sl_vm *vm) {
         for (uint32_t i = 0; i < f->reg_count; i++) {
             SL_DELREF(f->registers[i]);
         }
-        efree(f->registers);
+        if (!f->using_inline_registers) {
+            efree(f->registers);
+        }
         f->registers = NULL;
         f->reg_count = 0;
+        f->using_inline_registers = 0;
     }
 
     /* Release environment ref */
@@ -316,22 +338,29 @@ static void sl_vm_call_closure(sl_vm *vm, sl_js_closure *closure,
     }
 
     sl_func_descriptor *desc = closure->descriptor;
-    sl_environment *call_env = sl_env_extend(closure->captured_env);
+    sl_environment *call_env;
+
+    if (construct_target || desc->needs_call_env) {
+        call_env = sl_env_extend(closure->captured_env);
+    } else {
+        call_env = closure->captured_env;
+        SL_GC_ADDREF(call_env);
+    }
 
     /* If constructor call, define 'this' */
     if (construct_target) {
-        sl_env_define(call_env, zend_string_init("this", 4, 0), sl_val_object(construct_target), false);
+        zend_string *this_key = zend_string_init("this", 4, 0);
+        sl_env_define(call_env, this_key, sl_val_object(construct_target), false);
+        zend_string_release(this_key);
     }
 
     sl_vm_push_frame(vm, desc, call_env, construct_target);
     sl_call_frame *frame = &vm->frames[vm->frame_count - 1];
     sl_vm_bind_params(vm, desc, call_env, frame, args, argc);
 
-    /* sl_vm_push_frame added a ref, sl_env_extend set refcount to 1,
-     * and push_frame added another via SL_GC_ADDREF.  Release the
-     * extra from sl_env_extend. */
+    /* sl_vm_push_frame took its own env reference; release the temporary
+     * owner reference from this call path. */
     if (SL_GC_DELREF(call_env) == 0) {
-        /* Should not happen -- frame holds a ref */
         sl_env_free(call_env);
     }
 }
@@ -351,7 +380,7 @@ static sl_value sl_vm_call_native(sl_vm *vm, sl_native_func *native,
         if (actual_argc <= 16) {
             actual_args = bound_args_buf;
         } else {
-            bound_args_heap = emalloc(sizeof(sl_value) * actual_argc);
+            bound_args_heap = safe_emalloc(actual_argc, sizeof(sl_value), 0);
             actual_args = bound_args_heap;
         }
         actual_args[0] = native->bound_receiver;
@@ -365,10 +394,11 @@ static sl_value sl_vm_call_native(sl_vm *vm, sl_native_func *native,
     } else if (!Z_ISUNDEF(native->php_callable)) {
         /* Call PHP callable via zend_call_function */
         zval retval;
+        ZVAL_UNDEF(&retval);
         zval *zargs = NULL;
 
         if (actual_argc > 0) {
-            zargs = emalloc(sizeof(zval) * actual_argc);
+            zargs = safe_emalloc(actual_argc, sizeof(zval), 0);
             for (uint32_t i = 0; i < actual_argc; i++) {
                 sl_value_to_zval(&actual_args[i], &zargs[i]);
             }
@@ -385,9 +415,8 @@ static sl_value sl_vm_call_native(sl_vm *vm, sl_native_func *native,
             fci.param_count = actual_argc;
             fci.params = zargs;
 
-            if (zend_call_function(&fci, &fcc) == SUCCESS) {
+            if (zend_call_function(&fci, &fcc) == SUCCESS && !EG(exception) && !Z_ISUNDEF(retval)) {
                 result = sl_zval_to_value(&retval);
-                zval_ptr_dtor(&retval);
             } else {
                 result = sl_val_undefined();
             }
@@ -395,6 +424,9 @@ static sl_value sl_vm_call_native(sl_vm *vm, sl_native_func *native,
             result = sl_val_undefined();
         }
 
+        if (!Z_ISUNDEF(retval)) {
+            zval_ptr_dtor(&retval);
+        }
         if (error) efree(error);
         if (zargs) {
             for (uint32_t i = 0; i < actual_argc; i++) {
@@ -426,7 +458,7 @@ static void sl_vm_call(sl_vm *vm, uint32_t argc) {
     sl_value *heap_args = NULL;
 
     if (argc > 16) {
-        heap_args = emalloc(sizeof(sl_value) * argc);
+        heap_args = safe_emalloc(argc, sizeof(sl_value), 0);
         args = heap_args;
     }
     if (argc > 0) {
@@ -442,7 +474,6 @@ static void sl_vm_call(sl_vm *vm, uint32_t argc) {
         sl_value result = sl_vm_call_native(vm, callee.u.native, args, argc);
         sl_vm_ensure_stack(vm, vm->sp + 1);
         vm->stack[vm->sp++] = result;
-        SL_ADDREF(result);
     } else {
         sl_vm_throw_type_error(vm, "TypeError: is not a function");
     }
@@ -466,7 +497,7 @@ static void sl_vm_do_new(sl_vm *vm, uint32_t argc) {
     sl_value *heap_args = NULL;
 
     if (argc > 16) {
-        heap_args = emalloc(sizeof(sl_value) * argc);
+        heap_args = safe_emalloc(argc, sizeof(sl_value), 0);
         args = heap_args;
     }
     if (argc > 0) {
@@ -479,7 +510,6 @@ static void sl_vm_do_new(sl_vm *vm, uint32_t argc) {
         sl_value result = sl_vm_call_native(vm, callee.u.native, args, argc);
         sl_vm_ensure_stack(vm, vm->sp + 1);
         vm->stack[vm->sp++] = result;
-        SL_ADDREF(result);
     } else if (callee.tag == SL_TAG_CLOSURE) {
         sl_js_object *new_obj = sl_object_new();
         new_obj->constructor = callee.u.closure;
@@ -601,6 +631,71 @@ static inline sl_value sl_string_concat(sl_value a, sl_value b) {
     return sl_val_string(result);
 }
 
+static zend_always_inline bool sl_long_sub_checked(zend_long a, zend_long b, zend_long *out) {
+#if defined(__GNUC__)
+    return __builtin_sub_overflow(a, b, out);
+#else
+    long double r = (long double)a - (long double)b;
+    if (r > (long double)ZEND_LONG_MAX || r < (long double)ZEND_LONG_MIN) {
+        return true;
+    }
+    *out = (zend_long)r;
+    return false;
+#endif
+}
+
+static zend_always_inline bool sl_long_mul_checked(zend_long a, zend_long b, zend_long *out) {
+#if defined(__GNUC__)
+    return __builtin_mul_overflow(a, b, out);
+#else
+    long double r = (long double)a * (long double)b;
+    if (r > (long double)ZEND_LONG_MAX || r < (long double)ZEND_LONG_MIN) {
+        return true;
+    }
+    *out = (zend_long)r;
+    return false;
+#endif
+}
+
+static zend_always_inline sl_environment *sl_env_at_depth(sl_environment *env, int32_t depth) {
+    while (depth > 0 && env) {
+        env = env->parent;
+        depth--;
+    }
+    return env;
+}
+
+static zend_always_inline zval *sl_env_lookup_with_depth(
+    sl_environment *env,
+    zend_string *name,
+    int32_t *depth_out,
+    sl_environment **owner_out
+) {
+    int32_t depth = 0;
+    while (env) {
+        zval *found = zend_hash_find(env->values, name);
+        if (found) {
+            if (depth_out) {
+                *depth_out = depth;
+            }
+            if (owner_out) {
+                *owner_out = env;
+            }
+            return found;
+        }
+        env = env->parent;
+        depth++;
+    }
+
+    if (depth_out) {
+        *depth_out = -1;
+    }
+    if (owner_out) {
+        *owner_out = NULL;
+    }
+    return NULL;
+}
+
 /* ================================================================
  * The Hot Dispatch Loop
  * ================================================================ */
@@ -655,6 +750,7 @@ static inline sl_value sl_string_concat(sl_value a, sl_value b) {
     ops   = desc->ops;                                     \
     opA   = desc->opA;                                     \
     opB   = desc->opB;                                     \
+    local_ic = desc->local_ic_depth;                       \
     consts = desc->constants;                              \
     names  = desc->names;                                  \
     env    = frame->env;                                   \
@@ -773,6 +869,7 @@ static sl_value sl_vm_run(sl_vm *vm) {
     uint8_t       *ops;
     int32_t       *opA;
     int32_t       *opB;
+    int32_t       *local_ic;
     sl_value      *consts;
     zend_string  **names;
     sl_environment *env;
@@ -889,6 +986,15 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_SUB): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            zend_long r;
+            if (!sl_long_sub_checked(a.u.ival, b.u.ival, &r)) {
+                SL_DELREF(stack[sp - 1]);
+                SL_DELREF(b);
+                stack[sp - 1] = sl_val_int(r);
+                DISPATCH();
+            }
+        }
         double da = SL_IS_NUMERIC(a) ? sl_to_double(a) : sl_to_number(a);
         double db = SL_IS_NUMERIC(b) ? sl_to_double(b) : sl_to_number(b);
         SL_DELREF(stack[sp - 1]);
@@ -900,6 +1006,15 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_MUL): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            zend_long r;
+            if (!sl_long_mul_checked(a.u.ival, b.u.ival, &r)) {
+                SL_DELREF(stack[sp - 1]);
+                SL_DELREF(b);
+                stack[sp - 1] = sl_val_int(r);
+                DISPATCH();
+            }
+        }
         double da = SL_IS_NUMERIC(a) ? sl_to_double(a) : sl_to_number(a);
         double db = SL_IS_NUMERIC(b) ? sl_to_double(b) : sl_to_number(b);
         SL_DELREF(stack[sp - 1]);
@@ -930,6 +1045,12 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_MOD): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT && b.u.ival != 0)) {
+            SL_DELREF(stack[sp - 1]);
+            SL_DELREF(b);
+            stack[sp - 1] = sl_val_int(a.u.ival % b.u.ival);
+            DISPATCH();
+        }
         double da = SL_IS_NUMERIC(a) ? sl_to_double(a) : sl_to_number(a);
         double db = SL_IS_NUMERIC(b) ? sl_to_double(b) : sl_to_number(b);
         SL_DELREF(stack[sp - 1]);
@@ -940,6 +1061,11 @@ static sl_value sl_vm_run(sl_vm *vm) {
 
     TARGET(SL_OP_NEGATE): {
         sl_value a = stack[sp - 1];
+        if (EXPECTED(a.tag == SL_TAG_INT && a.u.ival != ZEND_LONG_MIN)) {
+            SL_DELREF(stack[sp - 1]);
+            stack[sp - 1] = sl_val_int(-a.u.ival);
+            DISPATCH();
+        }
         double da = SL_IS_NUMERIC(a) ? sl_to_double(a) : sl_to_number(a);
         SL_DELREF(stack[sp - 1]);
         stack[sp - 1] = sl_val_double(-da);
@@ -965,9 +1091,28 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_TYPEOF_VAR): {
         /* Safe typeof on identifier -- returns "undefined" if variable not defined */
         zend_string *name = names[opA[ci]];
+        zval *found = NULL;
+
+        int32_t cached_depth = local_ic[ci];
+        if (cached_depth >= 0) {
+            sl_environment *owner = sl_env_at_depth(env, cached_depth);
+            if (owner) {
+                found = zend_hash_find(owner->values, name);
+            }
+        }
+
+        if (!found) {
+            int32_t resolved_depth = -1;
+            found = sl_env_lookup_with_depth(env, name, &resolved_depth, NULL);
+            if (found) {
+                local_ic[ci] = resolved_depth;
+            }
+        }
+
         ENSURE_STACK(1);
-        if (sl_env_has(env, name)) {
-            sl_value val = sl_env_get(env, name);
+        if (found) {
+            sl_value *sv = (sl_value*)Z_PTR_P(found);
+            sl_value val = sl_value_copy(*sv);
             zend_string *t = sl_js_typeof(val);
             SL_DELREF(val);
             stack[sp++] = sl_val_string(t);
@@ -1114,7 +1259,9 @@ static sl_value sl_vm_run(sl_vm *vm) {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
         bool result;
-        if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            result = a.u.ival < b.u.ival;
+        } else if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
             double da = 0.0, db = 0.0;
             bool a_numeric = sl_str_try_numeric(a.u.str, &da);
             bool b_numeric = sl_str_try_numeric(b.u.str, &db);
@@ -1144,7 +1291,9 @@ static sl_value sl_vm_run(sl_vm *vm) {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
         bool result;
-        if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            result = a.u.ival <= b.u.ival;
+        } else if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
             double da = 0.0, db = 0.0;
             bool a_numeric = sl_str_try_numeric(a.u.str, &da);
             bool b_numeric = sl_str_try_numeric(b.u.str, &db);
@@ -1173,7 +1322,9 @@ static sl_value sl_vm_run(sl_vm *vm) {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
         bool result;
-        if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            result = a.u.ival > b.u.ival;
+        } else if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
             double da = 0.0, db = 0.0;
             bool a_numeric = sl_str_try_numeric(a.u.str, &da);
             bool b_numeric = sl_str_try_numeric(b.u.str, &db);
@@ -1202,7 +1353,9 @@ static sl_value sl_vm_run(sl_vm *vm) {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
         bool result;
-        if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
+        if (EXPECTED(a.tag == SL_TAG_INT && b.tag == SL_TAG_INT)) {
+            result = a.u.ival >= b.u.ival;
+        } else if (a.tag == SL_TAG_STRING && b.tag == SL_TAG_STRING) {
             double da = 0.0, db = 0.0;
             bool a_numeric = sl_str_try_numeric(a.u.str, &da);
             bool b_numeric = sl_str_try_numeric(b.u.str, &db);
@@ -1246,35 +1399,91 @@ static sl_value sl_vm_run(sl_vm *vm) {
      * ================================================================ */
 
     TARGET(SL_OP_GET_LOCAL): {
-        ENSURE_STACK(1);
-        sl_value val = sl_env_get(env, names[opA[ci]]);
-        if (UNEXPECTED(EG(exception))) {
-            /* sl_env_get threw ReferenceError */
-            zend_string *msg = zval_get_string(zend_read_property(
-                zend_ce_exception, EG(exception), "message", sizeof("message") - 1, 1, NULL));
-            zend_clear_exception();
-            sl_vm_throw_type_error(vm, ZSTR_VAL(msg));
-            zend_string_release(msg);
+        zval *found = NULL;
+        int32_t cached_depth = local_ic[ci];
+        zend_string *name = names[opA[ci]];
+
+        if (cached_depth >= 0) {
+            sl_environment *owner = sl_env_at_depth(env, cached_depth);
+            if (owner) {
+                found = zend_hash_find(owner->values, name);
+            }
+        }
+
+        if (!found) {
+            int32_t resolved_depth = -1;
+            found = sl_env_lookup_with_depth(env, name, &resolved_depth, NULL);
+            if (found) {
+                local_ic[ci] = resolved_depth;
+            }
+        }
+
+        if (UNEXPECTED(!found)) {
+            sl_vm_throw_reference_error(vm, ZSTR_VAL(name));
             SYNC_STATE();
             sl_vm_handle_throw(vm);
             if (UNEXPECTED(EG(exception))) return sl_val_undefined();
             RELOAD_STATE();
             DISPATCH();
         }
-        stack[sp++] = val;
+
+        ENSURE_STACK(1);
+        sl_value *sv = (sl_value*)Z_PTR_P(found);
+        stack[sp++] = sl_value_copy(*sv);
         DISPATCH();
     }
 
     TARGET(SL_OP_SET_LOCAL): {
         sl_value val = stack[--sp];
-        sl_env_set(env, names[opA[ci]], val);
-        SL_DELREF(val);
-        if (UNEXPECTED(EG(exception))) {
-            /* sl_env_set throws a PHP exception for const reassignment.
-             * Let it propagate to PHP caller as-is. */
+        zval *found = NULL;
+        sl_environment *owner = NULL;
+        int32_t cached_depth = local_ic[ci];
+        zend_string *name = names[opA[ci]];
+
+        if (cached_depth >= 0) {
+            owner = sl_env_at_depth(env, cached_depth);
+            if (owner) {
+                found = zend_hash_find(owner->values, name);
+            }
+        }
+
+        if (!found) {
+            int32_t resolved_depth = -1;
+            found = sl_env_lookup_with_depth(env, name, &resolved_depth, &owner);
+            if (found) {
+                local_ic[ci] = resolved_depth;
+            }
+        }
+
+        if (UNEXPECTED(!found)) {
+            SL_DELREF(val);
+            zend_throw_exception_ex(
+                spl_ce_RuntimeException,
+                0,
+                "ReferenceError: %s is not defined",
+                ZSTR_VAL(name)
+            );
             SYNC_STATE();
             return sl_val_undefined();
         }
+
+        if (UNEXPECTED(owner->const_bindings && zend_hash_exists(owner->const_bindings, name))) {
+            SL_DELREF(val);
+            zend_throw_exception_ex(
+                spl_ce_RuntimeException,
+                0,
+                "TypeError: Assignment to constant variable '%s'",
+                ZSTR_VAL(name)
+            );
+            SYNC_STATE();
+            return sl_val_undefined();
+        }
+
+        sl_value *sv = (sl_value*)Z_PTR_P(found);
+        SL_DELREF(*sv);
+        *sv = val;
+        SL_ADDREF(val);
+        SL_DELREF(val);
         DISPATCH();
     }
 
@@ -1567,7 +1776,6 @@ static sl_value sl_vm_run(sl_vm *vm) {
             sl_js_array *arr = args_val.u.arr;
             sl_value result = sl_vm_call_native(vm, callee.u.native, arr->elements, arr->length);
             ENSURE_STACK(1);
-            SL_ADDREF(result);
             stack[sp++] = result;
         } else {
             SL_DELREF(callee);
@@ -1608,7 +1816,6 @@ static sl_value sl_vm_run(sl_vm *vm) {
             sl_js_array *arr = args_val.u.arr;
             sl_value result = sl_vm_call_native(vm, callee.u.native, arr->elements, arr->length);
             ENSURE_STACK(1);
-            SL_ADDREF(result);
             stack[sp++] = result;
         } else {
             SL_DELREF(callee);
@@ -1635,7 +1842,6 @@ static sl_value sl_vm_run(sl_vm *vm) {
             sl_js_array *arr = args_val.u.arr;
             sl_value result = sl_vm_call_native(vm, callee.u.native, arr->elements, arr->length);
             ENSURE_STACK(1);
-            SL_ADDREF(result);
             stack[sp++] = result;
         } else if (callee.tag == SL_TAG_CLOSURE) {
             sl_js_array *arr = args_val.u.arr;
@@ -1702,8 +1908,8 @@ static sl_value sl_vm_run(sl_vm *vm) {
         zend_string **keys = NULL;
         sl_value *vals = NULL;
         if (count > 0) {
-            keys = emalloc(sizeof(zend_string *) * count);
-            vals = emalloc(sizeof(sl_value) * count);
+            keys = safe_emalloc(count, sizeof(zend_string *), 0);
+            vals = safe_emalloc(count, sizeof(sl_value), 0);
 
             for (int32_t j = (int32_t)count - 1; j >= 0; j--) {
                 vals[j] = stack[--sp];

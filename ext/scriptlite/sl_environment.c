@@ -37,15 +37,21 @@ void sl_env_free(sl_environment *env) {
 }
 
 void sl_env_define(sl_environment *env, zend_string *name, sl_value val, bool is_const) {
-    sl_value *sv = emalloc(sizeof(sl_value));
-    *sv = val;
-    SL_ADDREF(val);
+    zval *found = zend_hash_find(env->values, name);
+    if (found) {
+        sl_value *sv = (sl_value*)Z_PTR_P(found);
+        SL_DELREF(*sv);
+        *sv = val;
+        SL_ADDREF(val);
+    } else {
+        sl_value *sv = emalloc(sizeof(sl_value));
+        *sv = val;
+        SL_ADDREF(val);
 
-    zval zv;
-    ZVAL_PTR(&zv, sv);
-
-    /* Replace if exists, add if not */
-    zend_hash_update(env->values, name, &zv);
+        zval zv;
+        ZVAL_PTR(&zv, sv);
+        zend_hash_add_new(env->values, name, &zv);
+    }
 
     if (is_const) {
         if (!env->const_bindings) {
@@ -59,14 +65,13 @@ void sl_env_define(sl_environment *env, zend_string *name, sl_value val, bool is
 }
 
 sl_value sl_env_get(sl_environment *env, zend_string *name) {
-    zval *found = zend_hash_find(env->values, name);
-    if (found) {
-        sl_value *sv = (sl_value*)Z_PTR_P(found);
-        return sl_value_copy(*sv);
-    }
-
-    if (env->parent) {
-        return sl_env_get(env->parent, name);
+    while (env) {
+        zval *found = zend_hash_find(env->values, name);
+        if (found) {
+            sl_value *sv = (sl_value*)Z_PTR_P(found);
+            return sl_value_copy(*sv);
+        }
+        env = env->parent;
     }
 
     /* ReferenceError */
@@ -76,34 +81,33 @@ sl_value sl_env_get(sl_environment *env, zend_string *name) {
 }
 
 bool sl_env_has(sl_environment *env, zend_string *name) {
-    if (zend_hash_exists(env->values, name)) {
-        return true;
-    }
-    if (env->parent) {
-        return sl_env_has(env->parent, name);
+    while (env) {
+        if (zend_hash_exists(env->values, name)) {
+            return true;
+        }
+        env = env->parent;
     }
     return false;
 }
 
 void sl_env_set(sl_environment *env, zend_string *name, sl_value val) {
-    zval *found = zend_hash_find(env->values, name);
-    if (found) {
-        /* Check const */
-        if (env->const_bindings && zend_hash_exists(env->const_bindings, name)) {
-            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "TypeError: Assignment to constant variable '%s'", ZSTR_VAL(name));
+    sl_environment *cur = env;
+    while (cur) {
+        zval *found = zend_hash_find(cur->values, name);
+        if (found) {
+            /* Check const */
+            if (cur->const_bindings && zend_hash_exists(cur->const_bindings, name)) {
+                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                    "TypeError: Assignment to constant variable '%s'", ZSTR_VAL(name));
+                return;
+            }
+            sl_value *sv = (sl_value*)Z_PTR_P(found);
+            SL_DELREF(*sv);
+            *sv = val;
+            SL_ADDREF(val);
             return;
         }
-        sl_value *sv = (sl_value*)Z_PTR_P(found);
-        SL_DELREF(*sv);
-        *sv = val;
-        SL_ADDREF(val);
-        return;
-    }
-
-    if (env->parent) {
-        sl_env_set(env->parent, name, val);
-        return;
+        cur = cur->parent;
     }
 
     zend_throw_exception_ex(spl_ce_RuntimeException, 0,

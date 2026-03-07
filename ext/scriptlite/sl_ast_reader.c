@@ -1,32 +1,49 @@
 #include "sl_ast_reader.h"
 #include "sl_value.h"
+#include <string.h>
+
+static zend_class_entry *sl_ast_lookup_or_synthetic(const char *classname) {
+    zend_string *class_name = zend_string_init(classname, strlen(classname), 0);
+    zend_class_entry *ce = zend_lookup_class(class_name);
+    zend_string_release(class_name);
+
+    if (ce) {
+        return ce;
+    }
+
+    /*
+     * Native parser mode: AST classes may not be loaded at all.
+     * Create a minimal synthetic class-entry carrying only the class name,
+     * so sl_ast_is() can still resolve node kinds by short-name.
+     */
+    ce = emalloc(sizeof(zend_class_entry));
+    memset(ce, 0, sizeof(zend_class_entry));
+    ce->name = zend_string_init(classname, strlen(classname), 0);
+
+    if (!SL_G(ast_synthetic_entries)) {
+        ALLOC_HASHTABLE(SL_G(ast_synthetic_entries));
+        zend_hash_init(SL_G(ast_synthetic_entries), 16, NULL, NULL, 0);
+    }
+    zend_hash_next_index_insert_ptr(SL_G(ast_synthetic_entries), ce);
+
+    return ce;
+}
 
 /**
  * Initialize the AST class entry cache.
  * Called lazily on first use (RINIT or first compile call).
- * Looks up zend_class_entry* for each AST node type.
+ * In native-parser mode, missing classes are represented by synthetic
+ * class-entry placeholders keyed by canonical class name.
  */
 bool sl_ast_cache_init(void) {
     if (SL_G(ast_cache_initialized)) {
         return true;
     }
 
-    if (!sl_scriptlite_bootstrap_parser_runtime()) {
-        return false;
-    }
-
-    zend_class_entry *ce;
     sl_ast_class_cache *cache = &SL_G(ast_cache);
 
 #define LOOKUP_CE(field, classname) do { \
-    zend_string *_sl_class = zend_string_init(classname, sizeof(classname) - 1, 0); \
-    ce = zend_lookup_class(_sl_class); \
-    zend_string_release(_sl_class); \
-    if (!ce) { \
-        php_error_docref(NULL, E_WARNING, "ScriptLite AST class not found: %s", classname); \
-        return false; \
-    } \
-    cache->field = ce; \
+    cache->field = sl_ast_lookup_or_synthetic(classname); \
 } while(0)
 
     LOOKUP_CE(ce_program,             "ScriptLite\\Ast\\Program");
@@ -83,4 +100,25 @@ bool sl_ast_cache_init(void) {
 
     SL_G(ast_cache_initialized) = true;
     return true;
+}
+
+void sl_ast_cache_shutdown(void) {
+    if (SL_G(ast_synthetic_entries)) {
+        zend_class_entry *synthetic_ce;
+        ZEND_HASH_FOREACH_PTR(SL_G(ast_synthetic_entries), synthetic_ce) {
+            if (synthetic_ce) {
+                if (synthetic_ce->name) {
+                    zend_string_release(synthetic_ce->name);
+                    synthetic_ce->name = NULL;
+                }
+                efree(synthetic_ce);
+            }
+        } ZEND_HASH_FOREACH_END();
+        zend_hash_destroy(SL_G(ast_synthetic_entries));
+        FREE_HASHTABLE(SL_G(ast_synthetic_entries));
+        SL_G(ast_synthetic_entries) = NULL;
+    }
+
+    memset(&SL_G(ast_cache), 0, sizeof(SL_G(ast_cache)));
+    SL_G(ast_cache_initialized) = false;
 }

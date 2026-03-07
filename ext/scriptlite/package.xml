@@ -6,7 +6,7 @@
  <name>scriptlite</name>
  <channel>pecl.php.net</channel>
  <summary>High-performance ECMAScript interpreter for PHP</summary>
- <description>C extension for ScriptLite — high-performance ECMAScript interpreter with embedded parser runtime. Replaces the PHP bytecode VM with a C implementation using computed-goto dispatch.</description>
+ <description>C extension for ScriptLite — high-performance ECMAScript interpreter with native C parser. Replaces the PHP bytecode VM with a C implementation using computed-goto dispatch.</description>
  <lead>
   <name>Artur Heinze</name>
   <user>aheinze</user>
@@ -47,8 +47,8 @@
    <file name="sl_array_methods.h" role="src" />
    <file name="sl_ast_reader.c" role="src" />
    <file name="sl_ast_reader.h" role="src" />
-   <file name="sl_parser_runtime_bundle.h" role="src" />
-   <file name="parser_runtime_bundle.php" role="php" />
+   <file name="sl_parser.c" role="src" />
+   <file name="sl_parser.h" role="src" />
    <file name="composer.json" role="php" />
    <file name="README.md" role="doc" />
    <dir name="tests">

@@ -82,35 +82,55 @@ static void sl_compile_function_expr(sl_compiler *c, zval *expr);
 static void sl_ensure_op_capacity(sl_compiler *c, uint32_t needed) {
     if (needed <= c->op_capacity) return;
     uint32_t new_cap = c->op_capacity;
-    while (new_cap < needed) new_cap *= 2;
-    c->ops = erealloc(c->ops, new_cap * sizeof(uint8_t));
-    c->opA = erealloc(c->opA, new_cap * sizeof(int32_t));
-    c->opB = erealloc(c->opB, new_cap * sizeof(int32_t));
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler op capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    c->ops = safe_erealloc(c->ops, new_cap, sizeof(uint8_t), 0);
+    c->opA = safe_erealloc(c->opA, new_cap, sizeof(int32_t), 0);
+    c->opB = safe_erealloc(c->opB, new_cap, sizeof(int32_t), 0);
     c->op_capacity = new_cap;
 }
 
 static void sl_ensure_const_capacity(sl_compiler *c, uint32_t needed) {
     if (needed <= c->const_capacity) return;
     uint32_t new_cap = c->const_capacity;
-    while (new_cap < needed) new_cap *= 2;
-    c->constants = erealloc(c->constants, new_cap * sizeof(sl_value));
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler constant capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    c->constants = safe_erealloc(c->constants, new_cap, sizeof(sl_value), 0);
     c->const_capacity = new_cap;
 }
 
 static void sl_ensure_name_capacity(sl_compiler *c, uint32_t needed) {
     if (needed <= c->name_capacity) return;
     uint32_t new_cap = c->name_capacity;
-    while (new_cap < needed) new_cap *= 2;
-    c->names = erealloc(c->names, new_cap * sizeof(zend_string *));
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler name capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    c->names = safe_erealloc(c->names, new_cap, sizeof(zend_string *), 0);
     c->name_capacity = new_cap;
 }
 
 static void sl_ensure_param_capacity(sl_compiler *c, uint32_t needed) {
     if (needed <= c->param_capacity) return;
     uint32_t new_cap = c->param_capacity;
-    while (new_cap < needed) new_cap *= 2;
-    c->params = erealloc(c->params, new_cap * sizeof(zend_string *));
-    c->param_slots = erealloc(c->param_slots, new_cap * sizeof(int32_t));
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler param capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    c->params = safe_erealloc(c->params, new_cap, sizeof(zend_string *), 0);
+    c->param_slots = safe_erealloc(c->param_slots, new_cap, sizeof(int32_t), 0);
     c->param_capacity = new_cap;
 }
 
@@ -119,16 +139,19 @@ static void sl_ensure_param_capacity(sl_compiler *c, uint32_t needed) {
  * ============================================================ */
 static void sl_push_loop(sl_compiler *c) {
     if (c->loop_depth >= c->loop_capacity) {
+        if (UNEXPECTED(c->loop_capacity > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler loop stack overflow");
+        }
         uint32_t new_cap = c->loop_capacity * 2;
-        c->loop_stack = erealloc(c->loop_stack,
-            new_cap * sizeof(struct _sl_loop_ctx));
+        c->loop_stack = safe_erealloc(c->loop_stack,
+            new_cap, sizeof(struct _sl_loop_ctx), 0);
         c->loop_capacity = new_cap;
     }
     struct _sl_loop_ctx *lp = &c->loop_stack[c->loop_depth++];
-    lp->break_patches = emalloc(SL_INITIAL_BREAK_CAPACITY * sizeof(uint32_t));
+    lp->break_patches = safe_emalloc(SL_INITIAL_BREAK_CAPACITY, sizeof(uint32_t), 0);
     lp->break_count = 0;
     lp->break_capacity = SL_INITIAL_BREAK_CAPACITY;
-    lp->continue_patches = emalloc(SL_INITIAL_BREAK_CAPACITY * sizeof(uint32_t));
+    lp->continue_patches = safe_emalloc(SL_INITIAL_BREAK_CAPACITY, sizeof(uint32_t), 0);
     lp->continue_count = 0;
     lp->continue_capacity = SL_INITIAL_BREAK_CAPACITY;
     lp->is_switch = false;
@@ -156,9 +179,12 @@ static void sl_add_break_patch_at(sl_compiler *c, int32_t target_depth, uint32_t
     }
     struct _sl_loop_ctx *lp = &c->loop_stack[target_depth];
     if (lp->break_count >= lp->break_capacity) {
+        if (UNEXPECTED(lp->break_capacity > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler break patch capacity overflow");
+        }
         lp->break_capacity *= 2;
-        lp->break_patches = erealloc(lp->break_patches,
-            lp->break_capacity * sizeof(uint32_t));
+        lp->break_patches = safe_erealloc(lp->break_patches,
+            lp->break_capacity, sizeof(uint32_t), 0);
     }
     lp->break_patches[lp->break_count++] = addr;
 }
@@ -169,9 +195,12 @@ static void sl_add_continue_patch_at(sl_compiler *c, int32_t target_depth, uint3
     }
     struct _sl_loop_ctx *lp = &c->loop_stack[target_depth];
     if (lp->continue_count >= lp->continue_capacity) {
+        if (UNEXPECTED(lp->continue_capacity > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler continue patch capacity overflow");
+        }
         lp->continue_capacity *= 2;
-        lp->continue_patches = erealloc(lp->continue_patches,
-            lp->continue_capacity * sizeof(uint32_t));
+        lp->continue_patches = safe_erealloc(lp->continue_patches,
+            lp->continue_capacity, sizeof(uint32_t), 0);
     }
     lp->continue_patches[lp->continue_count++] = addr;
 }
@@ -195,9 +224,12 @@ static void sl_patch_breaks(sl_compiler *c) {
 
 static void sl_push_finally_ctx(sl_compiler *c, HashTable *fin_stmts) {
     if (c->finally_depth >= c->finally_capacity) {
+        if (UNEXPECTED(c->finally_capacity > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite compiler finally stack overflow");
+        }
         uint32_t new_cap = c->finally_capacity * 2;
-        c->finally_stack = erealloc(c->finally_stack,
-            new_cap * sizeof(struct _sl_finally_ctx));
+        c->finally_stack = safe_erealloc(c->finally_stack,
+            new_cap, sizeof(struct _sl_finally_ctx), 0);
         c->finally_capacity = new_cap;
     }
     struct _sl_finally_ctx *ctx = &c->finally_stack[c->finally_depth++];
@@ -238,14 +270,25 @@ static zend_string *sl_make_temp_name(const char *prefix) {
  * VarKind resolution: read a VarKind enum object -> int
  * ============================================================ */
 static int32_t sl_resolve_var_kind(zval *kind_zv) {
-    if (!kind_zv || Z_TYPE_P(kind_zv) != IS_OBJECT) return 0;
-    /* VarKind is a string-backed enum; read ->value */
-    zval *val = sl_ast_prop(kind_zv, SL_G(str_value));
-    if (val && Z_TYPE_P(val) == IS_STRING) {
-        zend_string *s = Z_STR_P(val);
+    if (!kind_zv) return 0;
+
+    if (Z_TYPE_P(kind_zv) == IS_STRING) {
+        zend_string *s = Z_STR_P(kind_zv);
         if (zend_string_equals_literal(s, "let")) return 1;
         if (zend_string_equals_literal(s, "const")) return 2;
+        return 0;
     }
+
+    if (Z_TYPE_P(kind_zv) == IS_OBJECT || Z_TYPE_P(kind_zv) == IS_ARRAY) {
+        /* VarKind enum object or array-shaped AST fallback. */
+        zval *val = sl_ast_prop(kind_zv, SL_G(str_value));
+        if (val && Z_TYPE_P(val) == IS_STRING) {
+            zend_string *s = Z_STR_P(val);
+            if (zend_string_equals_literal(s, "let")) return 1;
+            if (zend_string_equals_literal(s, "const")) return 2;
+        }
+    }
+
     return 0; /* var */
 }
 
@@ -284,17 +327,17 @@ void sl_compiler_init(sl_compiler *c) {
     memset(c, 0, sizeof(sl_compiler));
 
     c->op_capacity = SL_INITIAL_OP_CAPACITY;
-    c->ops = emalloc(c->op_capacity * sizeof(uint8_t));
-    c->opA = emalloc(c->op_capacity * sizeof(int32_t));
-    c->opB = emalloc(c->op_capacity * sizeof(int32_t));
+    c->ops = safe_emalloc(c->op_capacity, sizeof(uint8_t), 0);
+    c->opA = safe_emalloc(c->op_capacity, sizeof(int32_t), 0);
+    c->opB = safe_emalloc(c->op_capacity, sizeof(int32_t), 0);
 
     c->const_capacity = SL_INITIAL_CONST_CAPACITY;
-    c->constants = emalloc(c->const_capacity * sizeof(sl_value));
+    c->constants = safe_emalloc(c->const_capacity, sizeof(sl_value), 0);
     ALLOC_HASHTABLE(c->const_map);
     zend_hash_init(c->const_map, 16, NULL, NULL, 0);
 
     c->name_capacity = SL_INITIAL_NAME_CAPACITY;
-    c->names = emalloc(c->name_capacity * sizeof(zend_string *));
+    c->names = safe_emalloc(c->name_capacity, sizeof(zend_string *), 0);
     ALLOC_HASHTABLE(c->name_map);
     zend_hash_init(c->name_map, 16, NULL, NULL, 0);
 
@@ -304,14 +347,14 @@ void sl_compiler_init(sl_compiler *c) {
     zend_hash_init(c->captured_vars, 16, NULL, NULL, 0);
 
     c->param_capacity = SL_INITIAL_PARAM_CAPACITY;
-    c->params = emalloc(c->param_capacity * sizeof(zend_string *));
-    c->param_slots = emalloc(c->param_capacity * sizeof(int32_t));
+    c->params = safe_emalloc(c->param_capacity, sizeof(zend_string *), 0);
+    c->param_slots = safe_emalloc(c->param_capacity, sizeof(int32_t), 0);
 
     c->loop_capacity = SL_INITIAL_LOOP_CAPACITY;
-    c->loop_stack = emalloc(c->loop_capacity * sizeof(struct _sl_loop_ctx));
+    c->loop_stack = safe_emalloc(c->loop_capacity, sizeof(struct _sl_loop_ctx), 0);
 
     c->finally_capacity = SL_INITIAL_FINALLY_CAPACITY;
-    c->finally_stack = emalloc(c->finally_capacity * sizeof(struct _sl_finally_ctx));
+    c->finally_stack = safe_emalloc(c->finally_capacity, sizeof(struct _sl_finally_ctx), 0);
 }
 
 void sl_compiler_destroy(sl_compiler *c) {
@@ -557,22 +600,27 @@ static void sl_alloc_reg(sl_compiler *c, zend_string *name) {
  * ============================================================ */
 sl_func_descriptor *sl_compiler_build_descriptor(sl_compiler *c) {
     sl_func_descriptor *desc = sl_func_descriptor_new();
+    bool needs_call_env = false;
 
     if (c->func_name) {
         desc->name = zend_string_copy(c->func_name);
     }
 
     desc->op_count = c->op_count;
-    desc->ops = emalloc(c->op_count * sizeof(uint8_t));
+    desc->ops = safe_emalloc(c->op_count, sizeof(uint8_t), 0);
     memcpy(desc->ops, c->ops, c->op_count * sizeof(uint8_t));
-    desc->opA = emalloc(c->op_count * sizeof(int32_t));
+    desc->opA = safe_emalloc(c->op_count, sizeof(int32_t), 0);
     memcpy(desc->opA, c->opA, c->op_count * sizeof(int32_t));
-    desc->opB = emalloc(c->op_count * sizeof(int32_t));
+    desc->opB = safe_emalloc(c->op_count, sizeof(int32_t), 0);
     memcpy(desc->opB, c->opB, c->op_count * sizeof(int32_t));
+    desc->local_ic_depth = safe_emalloc(c->op_count, sizeof(int32_t), 0);
+    for (uint32_t i = 0; i < c->op_count; i++) {
+        desc->local_ic_depth[i] = -1;
+    }
 
     desc->const_count = c->const_count;
     if (c->const_count > 0) {
-        desc->constants = emalloc(c->const_count * sizeof(sl_value));
+        desc->constants = safe_emalloc(c->const_count, sizeof(sl_value), 0);
         for (uint32_t i = 0; i < c->const_count; i++) {
             desc->constants[i] = c->constants[i];
             SL_ADDREF(desc->constants[i]);
@@ -581,7 +629,7 @@ sl_func_descriptor *sl_compiler_build_descriptor(sl_compiler *c) {
 
     desc->name_count = c->name_count;
     if (c->name_count > 0) {
-        desc->names = emalloc(c->name_count * sizeof(zend_string *));
+        desc->names = safe_emalloc(c->name_count, sizeof(zend_string *), 0);
         for (uint32_t i = 0; i < c->name_count; i++) {
             desc->names[i] = zend_string_copy(c->names[i]);
         }
@@ -589,20 +637,37 @@ sl_func_descriptor *sl_compiler_build_descriptor(sl_compiler *c) {
 
     desc->param_count = c->param_count;
     if (c->param_count > 0) {
-        desc->params = emalloc(c->param_count * sizeof(zend_string *));
-        desc->param_slots = emalloc(c->param_count * sizeof(int32_t));
+        desc->params = safe_emalloc(c->param_count, sizeof(zend_string *), 0);
+        desc->param_slots = safe_emalloc(c->param_count, sizeof(int32_t), 0);
         for (uint32_t i = 0; i < c->param_count; i++) {
             desc->params[i] = zend_string_copy(c->params[i]);
             desc->param_slots[i] = c->param_slots[i];
+            if (c->param_slots[i] < 0) {
+                needs_call_env = true;
+            }
         }
     }
 
     if (c->rest_param) {
         desc->rest_param = zend_string_copy(c->rest_param);
         desc->rest_param_slot = c->rest_param_slot;
+        if (c->rest_param_slot < 0) {
+            needs_call_env = true;
+        }
+    }
+
+    if (!needs_call_env) {
+        for (uint32_t i = 0; i < c->op_count; i++) {
+            uint8_t op = c->ops[i];
+            if (op == SL_OP_DEFINE_VAR || op == SL_OP_PUSH_SCOPE) {
+                needs_call_env = true;
+                break;
+            }
+        }
     }
 
     desc->reg_count = c->reg_count;
+    desc->needs_call_env = needs_call_env ? 1 : 0;
 
     return desc;
 }
@@ -813,20 +878,19 @@ static void sl_compile_function_decl_hoist(sl_compiler *c, zval *decl) {
  * ============================================================ */
 void sl_compile_stmt(sl_compiler *c, zval *stmt) {
     sl_ast_class_cache *cc = &SL_G(ast_cache);
-    zend_class_entry *ce = Z_OBJCE_P(stmt);
 
-    if (ce == cc->ce_expression_stmt) {
+    if (sl_ast_is(stmt, cc->ce_expression_stmt)) {
         zval *expr = sl_ast_prop(stmt, SL_G(str_expression));
         sl_compile_expr(c, expr);
         sl_emit(c, SL_OP_POP, 0, 0);
     }
-    else if (ce == cc->ce_var_declaration) {
+    else if (sl_ast_is(stmt, cc->ce_var_declaration)) {
         sl_compile_var_declaration(c, stmt);
     }
-    else if (ce == cc->ce_function_decl) {
+    else if (sl_ast_is(stmt, cc->ce_function_decl)) {
         sl_compile_function_decl_hoist(c, stmt);
     }
-    else if (ce == cc->ce_return_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_return_stmt)) {
         zval *val = sl_ast_prop(stmt, SL_G(str_value));
         if (val && Z_TYPE_P(val) != IS_NULL) {
             sl_compile_expr(c, val);
@@ -835,31 +899,31 @@ void sl_compile_stmt(sl_compiler *c, zval *stmt) {
         }
         sl_emit(c, SL_OP_RETURN, 0, 0);
     }
-    else if (ce == cc->ce_block_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_block_stmt)) {
         sl_compile_block(c, stmt);
     }
-    else if (ce == cc->ce_if_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_if_stmt)) {
         sl_compile_if(c, stmt);
     }
-    else if (ce == cc->ce_while_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_while_stmt)) {
         sl_compile_while(c, stmt);
     }
-    else if (ce == cc->ce_for_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_for_stmt)) {
         sl_compile_for(c, stmt);
     }
-    else if (ce == cc->ce_for_of_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_for_of_stmt)) {
         sl_compile_for_of(c, stmt);
     }
-    else if (ce == cc->ce_for_in_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_for_in_stmt)) {
         sl_compile_for_in(c, stmt);
     }
-    else if (ce == cc->ce_destructuring_decl) {
+    else if (sl_ast_is(stmt, cc->ce_destructuring_decl)) {
         sl_compile_destructuring(c, stmt);
     }
-    else if (ce == cc->ce_var_declaration_list) {
+    else if (sl_ast_is(stmt, cc->ce_var_declaration_list)) {
         sl_compile_var_declaration_list(c, stmt);
     }
-    else if (ce == cc->ce_break_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_break_stmt)) {
         int32_t target_depth = sl_find_break_target_depth(c);
         if (target_depth < 0) {
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
@@ -869,7 +933,7 @@ void sl_compile_stmt(sl_compiler *c, zval *stmt) {
         sl_emit_pending_finalizers_for_target(c, target_depth);
         sl_add_break_patch_at(c, target_depth, sl_emit_jump(c, SL_OP_JUMP));
     }
-    else if (ce == cc->ce_continue_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_continue_stmt)) {
         int32_t target_depth = sl_find_continue_target_depth(c);
         if (target_depth < 0) {
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
@@ -879,18 +943,18 @@ void sl_compile_stmt(sl_compiler *c, zval *stmt) {
         sl_emit_pending_finalizers_for_target(c, target_depth);
         sl_add_continue_patch_at(c, target_depth, sl_emit_jump(c, SL_OP_JUMP));
     }
-    else if (ce == cc->ce_do_while_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_do_while_stmt)) {
         sl_compile_do_while(c, stmt);
     }
-    else if (ce == cc->ce_switch_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_switch_stmt)) {
         sl_compile_switch(c, stmt);
     }
-    else if (ce == cc->ce_throw_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_throw_stmt)) {
         zval *arg = sl_ast_prop(stmt, SL_G(str_argument));
         sl_compile_expr(c, arg);
         sl_emit(c, SL_OP_THROW, 0, 0);
     }
-    else if (ce == cc->ce_try_catch_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_try_catch_stmt)) {
         sl_compile_try_catch(c, stmt);
     }
 }
@@ -898,60 +962,54 @@ void sl_compile_stmt(sl_compiler *c, zval *stmt) {
 /* ============================================================
  * Statement compilation: individual node types
  * ============================================================ */
+static zend_always_inline zval *sl_ast_prop_lit(zval *obj, const char *name, size_t name_len) {
+    if (!obj) return NULL;
+
+    if (Z_TYPE_P(obj) == IS_OBJECT) {
+        HashTable *props = Z_OBJ_HT_P(obj)->get_properties(Z_OBJ_P(obj));
+        if (!props) return NULL;
+        zval *v = zend_hash_str_find(props, name, name_len);
+        if (!v) return NULL;
+        if (Z_TYPE_P(v) == IS_INDIRECT) {
+            v = Z_INDIRECT_P(v);
+        }
+        ZVAL_DEREF(v);
+        return v;
+    }
+
+    if (Z_TYPE_P(obj) == IS_ARRAY) {
+        return zend_hash_str_find(Z_ARRVAL_P(obj), name, name_len);
+    }
+
+    return NULL;
+}
+
 static zval *sl_ast_prop_initializer(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("initializer", 11, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "initializer", 11);
 }
 
 static zval *sl_ast_prop_block(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("block", 5, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "block", 5);
 }
 
 static zval *sl_ast_prop_handler(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("handler", 7, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "handler", 7);
 }
 
 static zval *sl_ast_prop_is_array(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("isArray", 7, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "isArray", 7);
 }
 
 static zval *sl_ast_prop_rest_name(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("restName", 8, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "restName", 8);
 }
 
 static zval *sl_ast_prop_optional(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("optional", 8, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "optional", 8);
 }
 
 static zval *sl_ast_prop_optional_chain(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("optionalChain", 13, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "optionalChain", 13);
 }
 
 static bool sl_ast_is_optional(zval *obj) {
@@ -961,19 +1019,11 @@ static bool sl_ast_is_optional(zval *obj) {
 }
 
 static zval *sl_ast_prop_param_destructures(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("paramDestructures", 17, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "paramDestructures", 17);
 }
 
 static zval *sl_ast_prop_computed_key(zval *obj) {
-    zval rv;
-    zend_string *s = zend_string_init("computedKey", 11, 0);
-    zval *v = zend_read_property_ex(Z_OBJCE_P(obj), Z_OBJ_P(obj), s, 1, &rv);
-    zend_string_release(s);
-    return v;
+    return sl_ast_prop_lit(obj, "computedKey", 11);
 }
 
 static void sl_compile_var_declaration(sl_compiler *c, zval *decl) {
@@ -1107,16 +1157,15 @@ static void sl_compile_for(sl_compiler *c, zval *stmt) {
 
     /* Determine if we need a scope for let/const init */
     bool needs_scope = false;
-    if (init && Z_TYPE_P(init) == IS_OBJECT) {
-        zend_class_entry *ice = Z_OBJCE_P(init);
-        if (ice == cc->ce_var_declaration) {
+    if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY)) {
+        if (sl_ast_is(init, cc->ce_var_declaration)) {
             zval *kind_zv = sl_ast_prop(init, SL_G(str_kind));
             zend_string *name = sl_ast_prop_str(init, SL_G(str_name));
             if (!sl_kind_is_var(kind_zv) && name
                 && !sl_is_reg_allocated(c, name)) {
                 needs_scope = true;
             }
-        } else if (ice == cc->ce_var_declaration_list) {
+        } else if (sl_ast_is(init, cc->ce_var_declaration_list)) {
             HashTable *decls = sl_ast_prop_array(init, SL_G(str_declarations));
             if (decls) {
                 zval *first;
@@ -1132,15 +1181,14 @@ static void sl_compile_for(sl_compiler *c, zval *stmt) {
     if (needs_scope) sl_emit(c, SL_OP_PUSH_SCOPE, 0, 0);
 
     /* Init */
-    if (init && Z_TYPE_P(init) == IS_OBJECT) {
-        zend_class_entry *ice = Z_OBJCE_P(init);
-        if (ice == cc->ce_var_declaration) {
+    if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY)) {
+        if (sl_ast_is(init, cc->ce_var_declaration)) {
             sl_compile_var_declaration(c, init);
-        } else if (ice == cc->ce_var_declaration_list) {
+        } else if (sl_ast_is(init, cc->ce_var_declaration_list)) {
             sl_compile_var_declaration_list(c, init);
-        } else if (ice == cc->ce_destructuring_decl) {
+        } else if (sl_ast_is(init, cc->ce_destructuring_decl)) {
             sl_compile_destructuring(c, init);
-        } else if (ice == cc->ce_expression_stmt) {
+        } else if (sl_ast_is(init, cc->ce_expression_stmt)) {
             zval *expr = sl_ast_prop(init, SL_G(str_expression));
             sl_compile_expr(c, expr);
             sl_emit(c, SL_OP_POP, 0, 0);
@@ -1336,7 +1384,7 @@ static void sl_compile_switch(sl_compiler *c, zval *stmt) {
     }
 
     uint32_t case_count = zend_hash_num_elements(cases);
-    uint32_t *case_jumps = emalloc(case_count * sizeof(uint32_t));
+    uint32_t *case_jumps = safe_emalloc(case_count, sizeof(uint32_t), 0);
     memset(case_jumps, 0, case_count * sizeof(uint32_t));
     int32_t default_index = -1;
 
@@ -1397,7 +1445,7 @@ static void sl_compile_switch(sl_compiler *c, zval *stmt) {
 static void sl_compile_try_catch(sl_compiler *c, zval *stmt) {
     zval *block = sl_ast_prop_block(stmt);
     HashTable *try_stmts = NULL;
-    if (block && Z_TYPE_P(block) == IS_OBJECT) {
+    if (block && (Z_TYPE_P(block) == IS_OBJECT || Z_TYPE_P(block) == IS_ARRAY)) {
         try_stmts = sl_ast_prop_array(block, SL_G(str_statements));
     }
 
@@ -1576,7 +1624,7 @@ static void sl_compile_destructuring_pattern(sl_compiler *c,
         /* Default value handling */
         zval *default_zv = zend_hash_str_find(bht, "default", 7);
         if (default_zv && Z_TYPE_P(default_zv) != IS_NULL
-            && Z_TYPE_P(default_zv) == IS_OBJECT) {
+            && (Z_TYPE_P(default_zv) == IS_OBJECT || Z_TYPE_P(default_zv) == IS_ARRAY)) {
             sl_emit(c, SL_OP_DUP, 0, 0);
             sl_emit_const(c, sl_val_undefined());
             sl_emit(c, SL_OP_STRICT_EQ, 0, 0);
@@ -1669,12 +1717,11 @@ static void sl_compile_param_destructuring(sl_compiler *c,
  * Expression compilation dispatch
  * ============================================================ */
 void sl_compile_expr(sl_compiler *c, zval *expr) {
-    if (!expr || Z_TYPE_P(expr) != IS_OBJECT) return;
+    if (!expr || (Z_TYPE_P(expr) != IS_OBJECT && Z_TYPE_P(expr) != IS_ARRAY)) return;
 
     sl_ast_class_cache *cc = &SL_G(ast_cache);
-    zend_class_entry *ce = Z_OBJCE_P(expr);
 
-    if (ce == cc->ce_number_literal) {
+    if (sl_ast_is(expr, cc->ce_number_literal)) {
         double val = sl_ast_prop_double(expr, SL_G(str_value));
         /* Store as int if it's an integer value */
         if (val == (double)(zend_long)val && !isinf(val) && !isnan(val)
@@ -1684,7 +1731,7 @@ void sl_compile_expr(sl_compiler *c, zval *expr) {
             sl_emit_const(c, sl_val_double(val));
         }
     }
-    else if (ce == cc->ce_string_literal) {
+    else if (sl_ast_is(expr, cc->ce_string_literal)) {
         zend_string *val = sl_ast_prop_str(expr, SL_G(str_value));
         if (val) {
             sl_emit_const(c, sl_val_string(zend_string_copy(val)));
@@ -1692,88 +1739,88 @@ void sl_compile_expr(sl_compiler *c, zval *expr) {
             sl_emit_const(c, sl_val_string(zend_string_init("", 0, 0)));
         }
     }
-    else if (ce == cc->ce_boolean_literal) {
+    else if (sl_ast_is(expr, cc->ce_boolean_literal)) {
         bool val = sl_ast_prop_bool(expr, SL_G(str_value));
         sl_emit_const(c, sl_val_bool(val));
     }
-    else if (ce == cc->ce_null_literal) {
+    else if (sl_ast_is(expr, cc->ce_null_literal)) {
         sl_emit_const(c, sl_val_null());
     }
-    else if (ce == cc->ce_undefined_literal) {
+    else if (sl_ast_is(expr, cc->ce_undefined_literal)) {
         sl_emit_const(c, sl_val_undefined());
     }
-    else if (ce == cc->ce_identifier) {
+    else if (sl_ast_is(expr, cc->ce_identifier)) {
         zend_string *name = sl_ast_prop_str(expr, SL_G(str_name));
         if (name) sl_emit_get_var(c, name);
     }
-    else if (ce == cc->ce_binary_expr) {
+    else if (sl_ast_is(expr, cc->ce_binary_expr)) {
         sl_compile_binary(c, expr);
     }
-    else if (ce == cc->ce_unary_expr) {
+    else if (sl_ast_is(expr, cc->ce_unary_expr)) {
         sl_compile_unary(c, expr);
     }
-    else if (ce == cc->ce_assign_expr) {
+    else if (sl_ast_is(expr, cc->ce_assign_expr)) {
         sl_compile_assign(c, expr);
     }
-    else if (ce == cc->ce_call_expr) {
+    else if (sl_ast_is(expr, cc->ce_call_expr)) {
         sl_compile_call(c, expr);
     }
-    else if (ce == cc->ce_function_expr) {
+    else if (sl_ast_is(expr, cc->ce_function_expr)) {
         sl_compile_function_expr(c, expr);
     }
-    else if (ce == cc->ce_logical_expr) {
+    else if (sl_ast_is(expr, cc->ce_logical_expr)) {
         sl_compile_logical(c, expr);
     }
-    else if (ce == cc->ce_conditional_expr) {
+    else if (sl_ast_is(expr, cc->ce_conditional_expr)) {
         sl_compile_conditional(c, expr);
     }
-    else if (ce == cc->ce_typeof_expr) {
+    else if (sl_ast_is(expr, cc->ce_typeof_expr)) {
         sl_compile_typeof(c, expr);
     }
-    else if (ce == cc->ce_array_literal) {
+    else if (sl_ast_is(expr, cc->ce_array_literal)) {
         sl_compile_array_literal(c, expr);
     }
-    else if (ce == cc->ce_object_literal) {
+    else if (sl_ast_is(expr, cc->ce_object_literal)) {
         sl_compile_object_literal(c, expr);
     }
-    else if (ce == cc->ce_member_expr) {
+    else if (sl_ast_is(expr, cc->ce_member_expr)) {
         sl_compile_member_expr(c, expr);
     }
-    else if (ce == cc->ce_member_assign_expr) {
+    else if (sl_ast_is(expr, cc->ce_member_assign_expr)) {
         sl_compile_member_assign(c, expr);
     }
-    else if (ce == cc->ce_this_expr) {
+    else if (sl_ast_is(expr, cc->ce_this_expr)) {
         zend_string *this_str = zend_string_init("this", 4, 0);
         sl_emit(c, SL_OP_GET_LOCAL, (int32_t)sl_emit_name(c, this_str), 0);
         zend_string_release(this_str);
     }
-    else if (ce == cc->ce_new_expr) {
+    else if (sl_ast_is(expr, cc->ce_new_expr)) {
         sl_compile_new(c, expr);
     }
-    else if (ce == cc->ce_regex_literal) {
+    else if (sl_ast_is(expr, cc->ce_regex_literal)) {
         sl_compile_regex(c, expr);
     }
-    else if (ce == cc->ce_template_literal) {
+    else if (sl_ast_is(expr, cc->ce_template_literal)) {
         sl_compile_template_literal(c, expr);
     }
-    else if (ce == cc->ce_update_expr) {
+    else if (sl_ast_is(expr, cc->ce_update_expr)) {
         sl_compile_update(c, expr);
     }
-    else if (ce == cc->ce_void_expr) {
+    else if (sl_ast_is(expr, cc->ce_void_expr)) {
         zval *operand = sl_ast_prop(expr, SL_G(str_operand));
-        if (operand && Z_TYPE_P(operand) == IS_OBJECT) {
+        if (operand && (Z_TYPE_P(operand) == IS_OBJECT || Z_TYPE_P(operand) == IS_ARRAY)) {
             sl_compile_expr(c, operand);
             sl_emit(c, SL_OP_POP, 0, 0);
         }
         sl_emit_const(c, sl_val_undefined());
     }
-    else if (ce == cc->ce_delete_expr) {
+    else if (sl_ast_is(expr, cc->ce_delete_expr)) {
         sl_compile_delete(c, expr);
     }
-    else if (ce == cc->ce_sequence_expr) {
+    else if (sl_ast_is(expr, cc->ce_sequence_expr)) {
         sl_compile_sequence(c, expr);
     }
-    else if (ce == cc->ce_spread_element) {
+    else if (sl_ast_is(expr, cc->ce_spread_element)) {
         /* Spread in expression context - compile the argument */
         zval *arg = sl_ast_prop(expr, SL_G(str_argument));
         sl_compile_expr(c, arg);
@@ -2530,65 +2577,64 @@ static void sl_collect_declarations(HashTable *stmts, HashTable *locals) {
     ZVAL_TRUE(&one);
 
     ZEND_HASH_FOREACH_VAL(stmts, s) {
-        if (Z_TYPE_P(s) != IS_OBJECT) continue;
-        zend_class_entry *ce = Z_OBJCE_P(s);
+        if (Z_TYPE_P(s) != IS_OBJECT && Z_TYPE_P(s) != IS_ARRAY) continue;
 
-        if (ce == cc->ce_var_declaration) {
+        if (sl_ast_is(s, cc->ce_var_declaration)) {
             zval *kind_zv = sl_ast_prop(s, SL_G(str_kind));
             if (sl_kind_is_var(kind_zv)) {
                 zend_string *name = sl_ast_prop_str(s, SL_G(str_name));
                 if (name) zend_hash_update(locals, name, &one);
             }
         }
-        else if (ce == cc->ce_function_decl) {
+        else if (sl_ast_is(s, cc->ce_function_decl)) {
             zend_string *name = sl_ast_prop_str(s, SL_G(str_name));
             if (name) zend_hash_update(locals, name, &one);
             /* Don't recurse into function body */
         }
-        else if (ce == cc->ce_block_stmt) {
+        else if (sl_ast_is(s, cc->ce_block_stmt)) {
             HashTable *inner = sl_ast_prop_array(s, SL_G(str_statements));
             if (inner) sl_collect_declarations(inner, locals);
         }
-        else if (ce == cc->ce_if_stmt) {
+        else if (sl_ast_is(s, cc->ce_if_stmt)) {
             zval *cons = sl_ast_prop(s, SL_G(str_consequent));
-            if (cons && Z_TYPE_P(cons) == IS_OBJECT) {
+            if (cons && (Z_TYPE_P(cons) == IS_OBJECT || Z_TYPE_P(cons) == IS_ARRAY)) {
                 HashTable tmp;
                 zend_hash_init(&tmp, 4, NULL, NULL, 0);
                 zval tmp_zv;
-                ZVAL_OBJ(&tmp_zv, Z_OBJ_P(cons));
+                ZVAL_COPY(&tmp_zv, cons);
                 zend_hash_next_index_insert(&tmp, &tmp_zv);
                 sl_collect_declarations(&tmp, locals);
                 zend_hash_destroy(&tmp);
             }
             zval *alt = sl_ast_prop(s, SL_G(str_alternate));
-            if (alt && Z_TYPE_P(alt) == IS_OBJECT) {
+            if (alt && (Z_TYPE_P(alt) == IS_OBJECT || Z_TYPE_P(alt) == IS_ARRAY)) {
                 HashTable tmp;
                 zend_hash_init(&tmp, 4, NULL, NULL, 0);
                 zval tmp_zv;
-                ZVAL_OBJ(&tmp_zv, Z_OBJ_P(alt));
+                ZVAL_COPY(&tmp_zv, alt);
                 zend_hash_next_index_insert(&tmp, &tmp_zv);
                 sl_collect_declarations(&tmp, locals);
                 zend_hash_destroy(&tmp);
             }
         }
-        else if (ce == cc->ce_while_stmt || ce == cc->ce_do_while_stmt) {
+        else if (sl_ast_is(s, cc->ce_while_stmt) || sl_ast_is(s, cc->ce_do_while_stmt)) {
             zval *body = sl_ast_prop(s, SL_G(str_body));
-            if (body && Z_TYPE_P(body) == IS_OBJECT) {
+            if (body && (Z_TYPE_P(body) == IS_OBJECT || Z_TYPE_P(body) == IS_ARRAY)) {
                 HashTable tmp;
                 zend_hash_init(&tmp, 4, NULL, NULL, 0);
                 zval tmp_zv;
-                ZVAL_OBJ(&tmp_zv, Z_OBJ_P(body));
+                ZVAL_COPY(&tmp_zv, body);
                 zend_hash_next_index_insert(&tmp, &tmp_zv);
                 sl_collect_declarations(&tmp, locals);
                 zend_hash_destroy(&tmp);
             }
         }
-        else if (ce == cc->ce_var_declaration_list) {
+        else if (sl_ast_is(s, cc->ce_var_declaration_list)) {
             HashTable *decls = sl_ast_prop_array(s, SL_G(str_declarations));
             if (decls) {
                 zval *d;
                 ZEND_HASH_FOREACH_VAL(decls, d) {
-                    if (Z_TYPE_P(d) != IS_OBJECT) continue;
+                    if (Z_TYPE_P(d) != IS_OBJECT && Z_TYPE_P(d) != IS_ARRAY) continue;
                     zval *kind_zv = sl_ast_prop(d, SL_G(str_kind));
                     if (sl_kind_is_var(kind_zv)) {
                         zend_string *nm = sl_ast_prop_str(d, SL_G(str_name));
@@ -2597,24 +2643,23 @@ static void sl_collect_declarations(HashTable *stmts, HashTable *locals) {
                 } ZEND_HASH_FOREACH_END();
             }
         }
-        else if (ce == cc->ce_for_stmt) {
+        else if (sl_ast_is(s, cc->ce_for_stmt)) {
             zval *init = sl_ast_prop(s, SL_G(str_init));
-            if (init && Z_TYPE_P(init) == IS_OBJECT) {
-                zend_class_entry *ice = Z_OBJCE_P(init);
-                if (ice == cc->ce_var_declaration) {
+            if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY)) {
+                if (sl_ast_is(init, cc->ce_var_declaration)) {
                     zval *kind_zv = sl_ast_prop(init, SL_G(str_kind));
                     if (sl_kind_is_var(kind_zv)) {
                         zend_string *nm = sl_ast_prop_str(init,
                             SL_G(str_name));
                         if (nm) zend_hash_update(locals, nm, &one);
                     }
-                } else if (ice == cc->ce_var_declaration_list) {
+                } else if (sl_ast_is(init, cc->ce_var_declaration_list)) {
                     HashTable *decls = sl_ast_prop_array(init,
                         SL_G(str_declarations));
                     if (decls) {
                         zval *d;
                         ZEND_HASH_FOREACH_VAL(decls, d) {
-                            if (Z_TYPE_P(d) != IS_OBJECT) continue;
+                            if (Z_TYPE_P(d) != IS_OBJECT && Z_TYPE_P(d) != IS_ARRAY) continue;
                             zval *kind_zv = sl_ast_prop(d, SL_G(str_kind));
                             if (sl_kind_is_var(kind_zv)) {
                                 zend_string *nm = sl_ast_prop_str(d,
@@ -2627,34 +2672,34 @@ static void sl_collect_declarations(HashTable *stmts, HashTable *locals) {
                 }
             }
             zval *body = sl_ast_prop(s, SL_G(str_body));
-            if (body && Z_TYPE_P(body) == IS_OBJECT) {
+            if (body && (Z_TYPE_P(body) == IS_OBJECT || Z_TYPE_P(body) == IS_ARRAY)) {
                 HashTable tmp;
                 zend_hash_init(&tmp, 4, NULL, NULL, 0);
                 zval tmp_zv;
-                ZVAL_OBJ(&tmp_zv, Z_OBJ_P(body));
+                ZVAL_COPY(&tmp_zv, body);
                 zend_hash_next_index_insert(&tmp, &tmp_zv);
                 sl_collect_declarations(&tmp, locals);
                 zend_hash_destroy(&tmp);
             }
         }
-        else if (ce == cc->ce_for_of_stmt || ce == cc->ce_for_in_stmt) {
+        else if (sl_ast_is(s, cc->ce_for_of_stmt) || sl_ast_is(s, cc->ce_for_in_stmt)) {
             zval *kind_zv = sl_ast_prop(s, SL_G(str_kind));
             if (sl_kind_is_var(kind_zv)) {
                 zend_string *nm = sl_ast_prop_str(s, SL_G(str_name));
                 if (nm) zend_hash_update(locals, nm, &one);
             }
             zval *body = sl_ast_prop(s, SL_G(str_body));
-            if (body && Z_TYPE_P(body) == IS_OBJECT) {
+            if (body && (Z_TYPE_P(body) == IS_OBJECT || Z_TYPE_P(body) == IS_ARRAY)) {
                 HashTable tmp;
                 zend_hash_init(&tmp, 4, NULL, NULL, 0);
                 zval tmp_zv;
-                ZVAL_OBJ(&tmp_zv, Z_OBJ_P(body));
+                ZVAL_COPY(&tmp_zv, body);
                 zend_hash_next_index_insert(&tmp, &tmp_zv);
                 sl_collect_declarations(&tmp, locals);
                 zend_hash_destroy(&tmp);
             }
         }
-        else if (ce == cc->ce_destructuring_decl) {
+        else if (sl_ast_is(s, cc->ce_destructuring_decl)) {
             zval *kind_zv = sl_ast_prop(s, SL_G(str_kind));
             if (sl_kind_is_var(kind_zv)) {
                 HashTable *bindings = sl_ast_prop_array(s,
@@ -2665,7 +2710,7 @@ static void sl_collect_declarations(HashTable *stmts, HashTable *locals) {
                 }
             }
         }
-        else if (ce == cc->ce_switch_stmt) {
+        else if (sl_ast_is(s, cc->ce_switch_stmt)) {
             HashTable *cases = sl_ast_prop_array(s, SL_G(str_cases));
             if (cases) {
                 zval *cs;
@@ -2676,24 +2721,24 @@ static void sl_collect_declarations(HashTable *stmts, HashTable *locals) {
                 } ZEND_HASH_FOREACH_END();
             }
         }
-        else if (ce == cc->ce_try_catch_stmt) {
+        else if (sl_ast_is(s, cc->ce_try_catch_stmt)) {
             zval *block = sl_ast_prop_block(s);
-            if (block && Z_TYPE_P(block) == IS_OBJECT) {
+            if (block && (Z_TYPE_P(block) == IS_OBJECT || Z_TYPE_P(block) == IS_ARRAY)) {
                 HashTable *bs = sl_ast_prop_array(block,
                     SL_G(str_statements));
                 if (bs) sl_collect_declarations(bs, locals);
             }
             zval *handler = sl_ast_prop_handler(s);
-            if (handler && Z_TYPE_P(handler) == IS_OBJECT) {
+            if (handler && (Z_TYPE_P(handler) == IS_OBJECT || Z_TYPE_P(handler) == IS_ARRAY)) {
                 zval *hbody = sl_ast_prop(handler, SL_G(str_body));
-                if (hbody && Z_TYPE_P(hbody) == IS_OBJECT) {
+                if (hbody && (Z_TYPE_P(hbody) == IS_OBJECT || Z_TYPE_P(hbody) == IS_ARRAY)) {
                     HashTable *hs = sl_ast_prop_array(hbody,
                         SL_G(str_statements));
                     if (hs) sl_collect_declarations(hs, locals);
                 }
             }
             zval *fin = sl_ast_prop(s, SL_G(str_finalizer));
-            if (fin && Z_TYPE_P(fin) == IS_OBJECT) {
+            if (fin && (Z_TYPE_P(fin) == IS_OBJECT || Z_TYPE_P(fin) == IS_ARRAY)) {
                 HashTable *fs = sl_ast_prop_array(fin,
                     SL_G(str_statements));
                 if (fs) sl_collect_declarations(fs, locals);
@@ -2742,50 +2787,49 @@ static void sl_collect_binding_names(HashTable *bindings, zval *rest_name_zv,
 static void sl_collect_inner_fn_refs(HashTable *stmts, HashTable *refs) {
     zval *s;
     ZEND_HASH_FOREACH_VAL(stmts, s) {
-        if (Z_TYPE_P(s) == IS_OBJECT) {
+        if (Z_TYPE_P(s) == IS_OBJECT || Z_TYPE_P(s) == IS_ARRAY) {
             sl_walk_for_inner_fn_refs(s, refs);
         }
     } ZEND_HASH_FOREACH_END();
 }
 
 static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
-    if (Z_TYPE_P(node) != IS_OBJECT) return;
+    if (Z_TYPE_P(node) != IS_OBJECT && Z_TYPE_P(node) != IS_ARRAY) return;
 
     sl_ast_class_cache *cc = &SL_G(ast_cache);
-    zend_class_entry *ce = Z_OBJCE_P(node);
 
     /* Inner function found -- deeply collect all identifiers */
-    if (ce == cc->ce_function_decl) {
+    if (sl_ast_is(node, cc->ce_function_decl)) {
         HashTable *body = sl_ast_prop_array(node, SL_G(str_body));
         if (body) sl_deep_collect_ids(body, refs);
         return;
     }
-    if (ce == cc->ce_function_expr) {
+    if (sl_ast_is(node, cc->ce_function_expr)) {
         HashTable *body = sl_ast_prop_array(node, SL_G(str_body));
         if (body) sl_deep_collect_ids(body, refs);
         return;
     }
 
     /* Recurse into children to find more inner functions */
-    if (ce == cc->ce_expression_stmt) {
+    if (sl_ast_is(node, cc->ce_expression_stmt)) {
         zval *e = sl_ast_prop(node, SL_G(str_expression));
         if (e) sl_walk_for_inner_fn_refs(e, refs);
     }
-    else if (ce == cc->ce_var_declaration) {
+    else if (sl_ast_is(node, cc->ce_var_declaration)) {
         zval *init = sl_ast_prop_initializer(node);
-        if (init && Z_TYPE_P(init) == IS_OBJECT)
+        if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY))
             sl_walk_for_inner_fn_refs(init, refs);
     }
-    else if (ce == cc->ce_return_stmt) {
+    else if (sl_ast_is(node, cc->ce_return_stmt)) {
         zval *v = sl_ast_prop(node, SL_G(str_value));
-        if (v && Z_TYPE_P(v) == IS_OBJECT)
+        if (v && (Z_TYPE_P(v) == IS_OBJECT || Z_TYPE_P(v) == IS_ARRAY))
             sl_walk_for_inner_fn_refs(v, refs);
     }
-    else if (ce == cc->ce_block_stmt) {
+    else if (sl_ast_is(node, cc->ce_block_stmt)) {
         HashTable *ss = sl_ast_prop_array(node, SL_G(str_statements));
         if (ss) sl_collect_inner_fn_refs(ss, refs);
     }
-    else if (ce == cc->ce_if_stmt) {
+    else if (sl_ast_is(node, cc->ce_if_stmt)) {
         zval *cond = sl_ast_prop(node, SL_G(str_condition));
         zval *cons = sl_ast_prop(node, SL_G(str_consequent));
         zval *alt  = sl_ast_prop(node, SL_G(str_alternate));
@@ -2794,21 +2838,20 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
         if (alt && Z_TYPE_P(alt) != IS_NULL)
             sl_walk_for_inner_fn_refs(alt, refs);
     }
-    else if (ce == cc->ce_while_stmt || ce == cc->ce_do_while_stmt) {
+    else if (sl_ast_is(node, cc->ce_while_stmt) || sl_ast_is(node, cc->ce_do_while_stmt)) {
         zval *cond = sl_ast_prop(node, SL_G(str_condition));
         zval *body = sl_ast_prop(node, SL_G(str_body));
         if (cond) sl_walk_for_inner_fn_refs(cond, refs);
         if (body) sl_walk_for_inner_fn_refs(body, refs);
     }
-    else if (ce == cc->ce_for_stmt) {
+    else if (sl_ast_is(node, cc->ce_for_stmt)) {
         zval *init = sl_ast_prop(node, SL_G(str_init));
-        if (init && Z_TYPE_P(init) == IS_OBJECT) {
-            zend_class_entry *ice = Z_OBJCE_P(init);
-            if (ice == cc->ce_var_declaration) {
+        if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY)) {
+            if (sl_ast_is(init, cc->ce_var_declaration)) {
                 zval *vi = sl_ast_prop_initializer(init);
-                if (vi && Z_TYPE_P(vi) == IS_OBJECT)
+                if (vi && (Z_TYPE_P(vi) == IS_OBJECT || Z_TYPE_P(vi) == IS_ARRAY))
                     sl_walk_for_inner_fn_refs(vi, refs);
-            } else if (ice == cc->ce_expression_stmt) {
+            } else if (sl_ast_is(init, cc->ce_expression_stmt)) {
                 zval *e = sl_ast_prop(init, SL_G(str_expression));
                 if (e) sl_walk_for_inner_fn_refs(e, refs);
             }
@@ -2822,35 +2865,35 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
         zval *body = sl_ast_prop(node, SL_G(str_body));
         if (body) sl_walk_for_inner_fn_refs(body, refs);
     }
-    else if (ce == cc->ce_for_of_stmt) {
+    else if (sl_ast_is(node, cc->ce_for_of_stmt)) {
         zval *iter = sl_ast_prop(node, SL_G(str_iterable));
         if (iter) sl_walk_for_inner_fn_refs(iter, refs);
         zval *body = sl_ast_prop(node, SL_G(str_body));
         if (body) sl_walk_for_inner_fn_refs(body, refs);
     }
-    else if (ce == cc->ce_for_in_stmt) {
+    else if (sl_ast_is(node, cc->ce_for_in_stmt)) {
         zval *obj = sl_ast_prop(node, SL_G(str_object));
         if (obj) sl_walk_for_inner_fn_refs(obj, refs);
         zval *body = sl_ast_prop(node, SL_G(str_body));
         if (body) sl_walk_for_inner_fn_refs(body, refs);
     }
-    else if (ce == cc->ce_destructuring_decl) {
+    else if (sl_ast_is(node, cc->ce_destructuring_decl)) {
         zval *init = sl_ast_prop_initializer(node);
-        if (init && Z_TYPE_P(init) == IS_OBJECT)
+        if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY))
             sl_walk_for_inner_fn_refs(init, refs);
     }
-    else if (ce == cc->ce_binary_expr || ce == cc->ce_logical_expr) {
+    else if (sl_ast_is(node, cc->ce_binary_expr) || sl_ast_is(node, cc->ce_logical_expr)) {
         zval *l = sl_ast_prop(node, SL_G(str_left));
         zval *r = sl_ast_prop(node, SL_G(str_right));
         if (l) sl_walk_for_inner_fn_refs(l, refs);
         if (r) sl_walk_for_inner_fn_refs(r, refs);
     }
-    else if (ce == cc->ce_unary_expr) {
+    else if (sl_ast_is(node, cc->ce_unary_expr)) {
         zval *op = sl_ast_prop(node, SL_G(str_operand));
-        if (op && Z_TYPE_P(op) == IS_OBJECT)
+        if (op && (Z_TYPE_P(op) == IS_OBJECT || Z_TYPE_P(op) == IS_ARRAY))
             sl_walk_for_inner_fn_refs(op, refs);
     }
-    else if (ce == cc->ce_conditional_expr) {
+    else if (sl_ast_is(node, cc->ce_conditional_expr)) {
         zval *cond = sl_ast_prop(node, SL_G(str_condition));
         zval *cons = sl_ast_prop(node, SL_G(str_consequent));
         zval *alt  = sl_ast_prop(node, SL_G(str_alternate));
@@ -2858,11 +2901,11 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
         if (cons) sl_walk_for_inner_fn_refs(cons, refs);
         if (alt)  sl_walk_for_inner_fn_refs(alt, refs);
     }
-    else if (ce == cc->ce_assign_expr) {
+    else if (sl_ast_is(node, cc->ce_assign_expr)) {
         zval *v = sl_ast_prop(node, SL_G(str_value));
         if (v) sl_walk_for_inner_fn_refs(v, refs);
     }
-    else if (ce == cc->ce_call_expr) {
+    else if (sl_ast_is(node, cc->ce_call_expr)) {
         zval *callee = sl_ast_prop(node, SL_G(str_callee));
         if (callee) sl_walk_for_inner_fn_refs(callee, refs);
         HashTable *args = sl_ast_prop_array(node, SL_G(str_arguments));
@@ -2873,7 +2916,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_array_literal) {
+    else if (sl_ast_is(node, cc->ce_array_literal)) {
         HashTable *els = sl_ast_prop_array(node, SL_G(str_elements));
         if (els) {
             zval *el;
@@ -2882,7 +2925,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_object_literal) {
+    else if (sl_ast_is(node, cc->ce_object_literal)) {
         HashTable *props = sl_ast_prop_array(node, SL_G(str_properties));
         if (props) {
             zval *p;
@@ -2892,7 +2935,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_member_expr) {
+    else if (sl_ast_is(node, cc->ce_member_expr)) {
         zval *obj = sl_ast_prop(node, SL_G(str_object));
         if (obj) sl_walk_for_inner_fn_refs(obj, refs);
         bool computed = sl_ast_prop_bool(node, SL_G(str_computed));
@@ -2901,7 +2944,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             if (prop) sl_walk_for_inner_fn_refs(prop, refs);
         }
     }
-    else if (ce == cc->ce_member_assign_expr) {
+    else if (sl_ast_is(node, cc->ce_member_assign_expr)) {
         zval *obj = sl_ast_prop(node, SL_G(str_object));
         if (obj) sl_walk_for_inner_fn_refs(obj, refs);
         bool computed = sl_ast_prop_bool(node, SL_G(str_computed));
@@ -2912,7 +2955,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
         zval *v = sl_ast_prop(node, SL_G(str_value));
         if (v) sl_walk_for_inner_fn_refs(v, refs);
     }
-    else if (ce == cc->ce_new_expr) {
+    else if (sl_ast_is(node, cc->ce_new_expr)) {
         zval *callee = sl_ast_prop(node, SL_G(str_callee));
         if (callee) sl_walk_for_inner_fn_refs(callee, refs);
         HashTable *args = sl_ast_prop_array(node, SL_G(str_arguments));
@@ -2923,7 +2966,7 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_template_literal) {
+    else if (sl_ast_is(node, cc->ce_template_literal)) {
         HashTable *exprs = sl_ast_prop_array(node, SL_G(str_expressions));
         if (exprs) {
             zval *e;
@@ -2932,20 +2975,20 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_typeof_expr || ce == cc->ce_void_expr || ce == cc->ce_delete_expr) {
+    else if (sl_ast_is(node, cc->ce_typeof_expr) || sl_ast_is(node, cc->ce_void_expr) || sl_ast_is(node, cc->ce_delete_expr)) {
         zval *op = sl_ast_prop(node, SL_G(str_operand));
-        if (op && Z_TYPE_P(op) == IS_OBJECT)
+        if (op && (Z_TYPE_P(op) == IS_OBJECT || Z_TYPE_P(op) == IS_ARRAY))
             sl_walk_for_inner_fn_refs(op, refs);
     }
-    else if (ce == cc->ce_update_expr) {
+    else if (sl_ast_is(node, cc->ce_update_expr)) {
         zval *arg = sl_ast_prop(node, SL_G(str_argument));
         if (arg) sl_walk_for_inner_fn_refs(arg, refs);
     }
-    else if (ce == cc->ce_spread_element) {
+    else if (sl_ast_is(node, cc->ce_spread_element)) {
         zval *arg = sl_ast_prop(node, SL_G(str_argument));
         if (arg) sl_walk_for_inner_fn_refs(arg, refs);
     }
-    else if (ce == cc->ce_sequence_expr) {
+    else if (sl_ast_is(node, cc->ce_sequence_expr)) {
         HashTable *exprs = sl_ast_prop_array(node, SL_G(str_expressions));
         if (exprs) {
             zval *e;
@@ -2962,37 +3005,36 @@ static void sl_walk_for_inner_fn_refs(zval *node, HashTable *refs) {
 static void sl_deep_collect_ids(HashTable *stmts, HashTable *refs) {
     zval *s;
     ZEND_HASH_FOREACH_VAL(stmts, s) {
-        if (Z_TYPE_P(s) == IS_OBJECT) {
+        if (Z_TYPE_P(s) == IS_OBJECT || Z_TYPE_P(s) == IS_ARRAY) {
             sl_deep_collect_stmt(s, refs);
         }
     } ZEND_HASH_FOREACH_END();
 }
 
 static void sl_deep_collect_stmt(zval *stmt, HashTable *refs) {
-    if (Z_TYPE_P(stmt) != IS_OBJECT) return;
+    if (Z_TYPE_P(stmt) != IS_OBJECT && Z_TYPE_P(stmt) != IS_ARRAY) return;
 
     sl_ast_class_cache *cc = &SL_G(ast_cache);
-    zend_class_entry *ce = Z_OBJCE_P(stmt);
 
-    if (ce == cc->ce_expression_stmt) {
+    if (sl_ast_is(stmt, cc->ce_expression_stmt)) {
         zval *e = sl_ast_prop(stmt, SL_G(str_expression));
         if (e) sl_deep_collect_expr(e, refs);
     }
-    else if (ce == cc->ce_var_declaration) {
+    else if (sl_ast_is(stmt, cc->ce_var_declaration)) {
         zval *init = sl_ast_prop_initializer(stmt);
-        if (init && Z_TYPE_P(init) == IS_OBJECT)
+        if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY))
             sl_deep_collect_expr(init, refs);
     }
-    else if (ce == cc->ce_return_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_return_stmt)) {
         zval *v = sl_ast_prop(stmt, SL_G(str_value));
-        if (v && Z_TYPE_P(v) == IS_OBJECT)
+        if (v && (Z_TYPE_P(v) == IS_OBJECT || Z_TYPE_P(v) == IS_ARRAY))
             sl_deep_collect_expr(v, refs);
     }
-    else if (ce == cc->ce_block_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_block_stmt)) {
         HashTable *ss = sl_ast_prop_array(stmt, SL_G(str_statements));
         if (ss) sl_deep_collect_ids(ss, refs);
     }
-    else if (ce == cc->ce_if_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_if_stmt)) {
         zval *cond = sl_ast_prop(stmt, SL_G(str_condition));
         if (cond) sl_deep_collect_expr(cond, refs);
         zval *cons = sl_ast_prop(stmt, SL_G(str_consequent));
@@ -3001,21 +3043,20 @@ static void sl_deep_collect_stmt(zval *stmt, HashTable *refs) {
         if (alt && Z_TYPE_P(alt) != IS_NULL)
             sl_deep_collect_stmt(alt, refs);
     }
-    else if (ce == cc->ce_while_stmt || ce == cc->ce_do_while_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_while_stmt) || sl_ast_is(stmt, cc->ce_do_while_stmt)) {
         zval *cond = sl_ast_prop(stmt, SL_G(str_condition));
         if (cond) sl_deep_collect_expr(cond, refs);
         zval *body = sl_ast_prop(stmt, SL_G(str_body));
         if (body) sl_deep_collect_stmt(body, refs);
     }
-    else if (ce == cc->ce_for_stmt) {
+    else if (sl_ast_is(stmt, cc->ce_for_stmt)) {
         zval *init = sl_ast_prop(stmt, SL_G(str_init));
-        if (init && Z_TYPE_P(init) == IS_OBJECT) {
-            zend_class_entry *ice = Z_OBJCE_P(init);
-            if (ice == cc->ce_var_declaration) {
+        if (init && (Z_TYPE_P(init) == IS_OBJECT || Z_TYPE_P(init) == IS_ARRAY)) {
+            if (sl_ast_is(init, cc->ce_var_declaration)) {
                 zval *vi = sl_ast_prop_initializer(init);
-                if (vi && Z_TYPE_P(vi) == IS_OBJECT)
+                if (vi && (Z_TYPE_P(vi) == IS_OBJECT || Z_TYPE_P(vi) == IS_ARRAY))
                     sl_deep_collect_expr(vi, refs);
-            } else if (ice == cc->ce_expression_stmt) {
+            } else if (sl_ast_is(init, cc->ce_expression_stmt)) {
                 zval *e = sl_ast_prop(init, SL_G(str_expression));
                 if (e) sl_deep_collect_expr(e, refs);
             }
@@ -3029,7 +3070,7 @@ static void sl_deep_collect_stmt(zval *stmt, HashTable *refs) {
         zval *body = sl_ast_prop(stmt, SL_G(str_body));
         if (body) sl_deep_collect_stmt(body, refs);
     }
-    else if (ce == cc->ce_function_decl) {
+    else if (sl_ast_is(stmt, cc->ce_function_decl)) {
         /* Recurse into nested inner functions too */
         HashTable *body = sl_ast_prop_array(stmt, SL_G(str_body));
         if (body) sl_deep_collect_ids(body, refs);
@@ -3037,35 +3078,34 @@ static void sl_deep_collect_stmt(zval *stmt, HashTable *refs) {
 }
 
 static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
-    if (Z_TYPE_P(expr) != IS_OBJECT) return;
+    if (Z_TYPE_P(expr) != IS_OBJECT && Z_TYPE_P(expr) != IS_ARRAY) return;
 
     sl_ast_class_cache *cc = &SL_G(ast_cache);
-    zend_class_entry *ce = Z_OBJCE_P(expr);
     zval one;
     ZVAL_TRUE(&one);
 
-    if (ce == cc->ce_identifier) {
+    if (sl_ast_is(expr, cc->ce_identifier)) {
         zend_string *name = sl_ast_prop_str(expr, SL_G(str_name));
         if (name) zend_hash_update(refs, name, &one);
     }
-    else if (ce == cc->ce_assign_expr) {
+    else if (sl_ast_is(expr, cc->ce_assign_expr)) {
         zend_string *name = sl_ast_prop_str(expr, SL_G(str_name));
         if (name) zend_hash_update(refs, name, &one);
         zval *v = sl_ast_prop(expr, SL_G(str_value));
         if (v) sl_deep_collect_expr(v, refs);
     }
-    else if (ce == cc->ce_binary_expr || ce == cc->ce_logical_expr) {
+    else if (sl_ast_is(expr, cc->ce_binary_expr) || sl_ast_is(expr, cc->ce_logical_expr)) {
         zval *l = sl_ast_prop(expr, SL_G(str_left));
         zval *r = sl_ast_prop(expr, SL_G(str_right));
         if (l) sl_deep_collect_expr(l, refs);
         if (r) sl_deep_collect_expr(r, refs);
     }
-    else if (ce == cc->ce_unary_expr) {
+    else if (sl_ast_is(expr, cc->ce_unary_expr)) {
         zval *op = sl_ast_prop(expr, SL_G(str_operand));
-        if (op && Z_TYPE_P(op) == IS_OBJECT)
+        if (op && (Z_TYPE_P(op) == IS_OBJECT || Z_TYPE_P(op) == IS_ARRAY))
             sl_deep_collect_expr(op, refs);
     }
-    else if (ce == cc->ce_conditional_expr) {
+    else if (sl_ast_is(expr, cc->ce_conditional_expr)) {
         zval *cond = sl_ast_prop(expr, SL_G(str_condition));
         zval *cons = sl_ast_prop(expr, SL_G(str_consequent));
         zval *alt  = sl_ast_prop(expr, SL_G(str_alternate));
@@ -3073,7 +3113,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
         if (cons) sl_deep_collect_expr(cons, refs);
         if (alt)  sl_deep_collect_expr(alt, refs);
     }
-    else if (ce == cc->ce_call_expr) {
+    else if (sl_ast_is(expr, cc->ce_call_expr)) {
         zval *callee = sl_ast_prop(expr, SL_G(str_callee));
         if (callee) sl_deep_collect_expr(callee, refs);
         HashTable *args = sl_ast_prop_array(expr, SL_G(str_arguments));
@@ -3084,18 +3124,18 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_function_expr) {
+    else if (sl_ast_is(expr, cc->ce_function_expr)) {
         /* Recurse into nested inner functions */
         HashTable *body = sl_ast_prop_array(expr, SL_G(str_body));
         if (body) {
             zval *s;
             ZEND_HASH_FOREACH_VAL(body, s) {
-                if (Z_TYPE_P(s) == IS_OBJECT)
+                if (Z_TYPE_P(s) == IS_OBJECT || Z_TYPE_P(s) == IS_ARRAY)
                     sl_deep_collect_stmt(s, refs);
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_array_literal) {
+    else if (sl_ast_is(expr, cc->ce_array_literal)) {
         HashTable *els = sl_ast_prop_array(expr, SL_G(str_elements));
         if (els) {
             zval *el;
@@ -3104,7 +3144,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_object_literal) {
+    else if (sl_ast_is(expr, cc->ce_object_literal)) {
         HashTable *props = sl_ast_prop_array(expr, SL_G(str_properties));
         if (props) {
             zval *p;
@@ -3114,7 +3154,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_member_expr) {
+    else if (sl_ast_is(expr, cc->ce_member_expr)) {
         zval *obj = sl_ast_prop(expr, SL_G(str_object));
         if (obj) sl_deep_collect_expr(obj, refs);
         bool computed = sl_ast_prop_bool(expr, SL_G(str_computed));
@@ -3123,7 +3163,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             if (prop) sl_deep_collect_expr(prop, refs);
         }
     }
-    else if (ce == cc->ce_member_assign_expr) {
+    else if (sl_ast_is(expr, cc->ce_member_assign_expr)) {
         zval *obj = sl_ast_prop(expr, SL_G(str_object));
         if (obj) sl_deep_collect_expr(obj, refs);
         bool computed = sl_ast_prop_bool(expr, SL_G(str_computed));
@@ -3134,7 +3174,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
         zval *v = sl_ast_prop(expr, SL_G(str_value));
         if (v) sl_deep_collect_expr(v, refs);
     }
-    else if (ce == cc->ce_new_expr) {
+    else if (sl_ast_is(expr, cc->ce_new_expr)) {
         zval *callee = sl_ast_prop(expr, SL_G(str_callee));
         if (callee) sl_deep_collect_expr(callee, refs);
         HashTable *args = sl_ast_prop_array(expr, SL_G(str_arguments));
@@ -3145,7 +3185,7 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_template_literal) {
+    else if (sl_ast_is(expr, cc->ce_template_literal)) {
         HashTable *exprs = sl_ast_prop_array(expr, SL_G(str_expressions));
         if (exprs) {
             zval *e;
@@ -3154,20 +3194,20 @@ static void sl_deep_collect_expr(zval *expr, HashTable *refs) {
             } ZEND_HASH_FOREACH_END();
         }
     }
-    else if (ce == cc->ce_typeof_expr || ce == cc->ce_void_expr || ce == cc->ce_delete_expr) {
+    else if (sl_ast_is(expr, cc->ce_typeof_expr) || sl_ast_is(expr, cc->ce_void_expr) || sl_ast_is(expr, cc->ce_delete_expr)) {
         zval *op = sl_ast_prop(expr, SL_G(str_operand));
-        if (op && Z_TYPE_P(op) == IS_OBJECT)
+        if (op && (Z_TYPE_P(op) == IS_OBJECT || Z_TYPE_P(op) == IS_ARRAY))
             sl_deep_collect_expr(op, refs);
     }
-    else if (ce == cc->ce_update_expr) {
+    else if (sl_ast_is(expr, cc->ce_update_expr)) {
         zval *arg = sl_ast_prop(expr, SL_G(str_argument));
         if (arg) sl_deep_collect_expr(arg, refs);
     }
-    else if (ce == cc->ce_spread_element) {
+    else if (sl_ast_is(expr, cc->ce_spread_element)) {
         zval *arg = sl_ast_prop(expr, SL_G(str_argument));
         if (arg) sl_deep_collect_expr(arg, refs);
     }
-    else if (ce == cc->ce_sequence_expr) {
+    else if (sl_ast_is(expr, cc->ce_sequence_expr)) {
         HashTable *exprs = sl_ast_prop_array(expr, SL_G(str_expressions));
         if (exprs) {
             zval *e;

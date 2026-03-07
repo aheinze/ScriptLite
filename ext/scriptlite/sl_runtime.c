@@ -19,7 +19,7 @@ sl_js_array *sl_array_new(uint32_t initial_capacity) {
     arr->gc.refcount = 1;
     arr->length = 0;
     arr->capacity = initial_capacity > 4 ? initial_capacity : 4;
-    arr->elements = emalloc(sizeof(sl_value) * arr->capacity);
+    arr->elements = safe_emalloc(arr->capacity, sizeof(sl_value), 0);
     arr->properties = NULL;
     return arr;
 }
@@ -49,8 +49,13 @@ void sl_array_free(sl_js_array *arr) {
 void sl_array_ensure_capacity(sl_js_array *arr, uint32_t needed) {
     if (needed <= arr->capacity) return;
     uint32_t new_cap = arr->capacity;
-    while (new_cap < needed) new_cap *= 2;
-    arr->elements = erealloc(arr->elements, sizeof(sl_value) * new_cap);
+    while (new_cap < needed) {
+        if (UNEXPECTED(new_cap > UINT32_MAX / 2)) {
+            zend_error_noreturn(E_ERROR, "ScriptLite array capacity overflow");
+        }
+        new_cap *= 2;
+    }
+    arr->elements = safe_erealloc(arr->elements, new_cap, sizeof(sl_value), 0);
     arr->capacity = new_cap;
 }
 
@@ -686,6 +691,7 @@ void sl_func_descriptor_free(sl_func_descriptor *desc) {
     if (desc->ops) efree(desc->ops);
     if (desc->opA) efree(desc->opA);
     if (desc->opB) efree(desc->opB);
+    if (desc->local_ic_depth) efree(desc->local_ic_depth);
     if (desc->constants) {
         for (uint32_t i = 0; i < desc->const_count; i++) {
             SL_DELREF(desc->constants[i]);

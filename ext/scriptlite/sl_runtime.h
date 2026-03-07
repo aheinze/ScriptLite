@@ -148,6 +148,8 @@ struct _sl_func_descriptor {
     zend_string  *rest_param;
     int32_t       rest_param_slot;
     uint32_t      reg_count;
+    zend_bool     needs_call_env;
+    int32_t      *local_ic_depth;
 };
 
 sl_func_descriptor *sl_func_descriptor_new(void);

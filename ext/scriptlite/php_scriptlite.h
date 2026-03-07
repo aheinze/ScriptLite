@@ -87,8 +87,7 @@ typedef struct _sl_ast_class_cache {
 ZEND_BEGIN_MODULE_GLOBALS(scriptlite)
     sl_ast_class_cache ast_cache;
     bool ast_cache_initialized;
-    zend_class_entry *ce_parser;
-    bool parser_cache_initialized;
+    HashTable *ast_synthetic_entries;
 
     /* Interned strings for AST property names */
     zend_string *str_body;
@@ -159,7 +158,5 @@ extern zend_class_entry *ce_sl_compiled_script;
 extern zend_class_entry *ce_sl_compiler;
 extern zend_class_entry *ce_sl_virtual_machine;
 extern zend_class_entry *ce_sl_engine;
-
-bool sl_scriptlite_bootstrap_parser_runtime(void);
 
 #endif /* PHP_SCRIPTLITE_H */

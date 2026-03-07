@@ -10,7 +10,7 @@
 #include "sl_compiler.h"
 #include "sl_ast_reader.h"
 #include "sl_builtins.h"
-#include "sl_parser_runtime_bundle.h"
+#include "sl_parser.h"
 #include "zend_smart_str.h"
 #include "ext/standard/base64.h"
 #include "ext/spl/spl_exceptions.h"
@@ -31,8 +31,6 @@ static zend_object_handlers sl_vm_handlers;
 static zend_object_handlers sl_engine_handlers;
 typedef struct _sl_engine_obj sl_engine_obj;
 
-static bool sl_scriptlite_class_exists(const char *name);
-static bool sl_scriptlite_eval_embedded_parser_runtime(void);
 static sl_compiled_script *sl_compile_source(zend_string *source);
 static zend_string *sl_scriptlite_make_transpiled_payload(zend_string *source);
 static inline bool sl_scriptlite_is_transpiler_payload(zval *payload);
@@ -270,70 +268,6 @@ static void sl_engine_execute(sl_engine_obj *engine, zval *script, zval *globals
             script
         );
     }
-}
-
-static bool sl_scriptlite_class_exists(const char *name) {
-    zend_string *class_name = zend_string_init(name, strlen(name), 0);
-    zend_class_entry *ce = zend_lookup_class(class_name);
-    zend_string_release(class_name);
-    return ce != NULL;
-}
-
-static bool sl_scriptlite_eval_embedded_parser_runtime(void) {
-    zend_string *bundle = php_base64_decode_ex(
-        (const unsigned char *)sl_parser_runtime_bundle_b64,
-        sl_parser_runtime_bundle_b64_len,
-        false
-    );
-    if (!bundle) {
-        zend_throw_exception(
-            zend_ce_exception,
-            "Failed to decode embedded ScriptLite parser runtime bundle.",
-            0
-        );
-        return false;
-    }
-
-    zend_result result = zend_eval_stringl(
-        ZSTR_VAL(bundle),
-        ZSTR_LEN(bundle),
-        NULL,
-        "scriptlite_parser_runtime"
-    );
-    zend_string_release(bundle);
-    if (result == FAILURE) {
-        if (!EG(exception)) {
-            zend_throw_exception(
-                zend_ce_exception,
-                "Failed to execute embedded ScriptLite parser runtime.",
-                0
-            );
-        }
-        return false;
-    }
-    return true;
-}
-
-bool sl_scriptlite_bootstrap_parser_runtime(void) {
-    if (sl_scriptlite_class_exists("ScriptLite\\Ast\\Parser")) {
-        return true;
-    }
-
-    if (!sl_scriptlite_eval_embedded_parser_runtime()) {
-        return false;
-    }
-
-    if (!sl_scriptlite_class_exists("ScriptLite\\Ast\\Parser")) {
-        if (!EG(exception)) {
-            zend_throw_exception(
-                zend_ce_exception,
-                "ScriptLite parser bootstrap did not define ScriptLite\\Ast\\Parser.",
-                0
-            );
-        }
-        return false;
-    }
-    return true;
 }
 
 /* ============================================================
@@ -707,28 +641,6 @@ PHP_METHOD(ScriptLite_Engine, getOutput) {
     RETURN_EMPTY_STRING();
 }
 
-static bool sl_parser_cache_init(void) {
-    if (SL_G(parser_cache_initialized)) {
-        return true;
-    }
-
-    if (!sl_scriptlite_bootstrap_parser_runtime()) {
-        return false;
-    }
-
-    zend_string *class_name = zend_string_init("ScriptLite\\Ast\\Parser", sizeof("ScriptLite\\Ast\\Parser") - 1, 0);
-    zend_class_entry *ce = zend_lookup_class(class_name);
-    zend_string_release(class_name);
-
-    if (!ce) {
-        return false;
-    }
-
-    SL_G(ce_parser) = ce;
-    SL_G(parser_cache_initialized) = true;
-    return true;
-}
-
 static sl_compiled_script *sl_compile_ast(zval *program_zval) {
     sl_compiler compiler;
     sl_compiler_init(&compiler);
@@ -738,76 +650,57 @@ static sl_compiled_script *sl_compile_ast(zval *program_zval) {
 }
 
 static sl_compiled_script *sl_compile_source(zend_string *source) {
-    if (!sl_parser_cache_init()) {
-        zend_throw_exception(zend_ce_exception,
-            "Failed to initialize ScriptLite AST parser class. "
-            "Ensure ScriptLite\\\\Ast\\\\Parser is autoloadable.", 0);
-        return NULL;
-    }
-
     if (!sl_ast_cache_init()) {
-        zend_throw_exception(zend_ce_exception,
-            "Failed to initialize ScriptLite AST class cache. "
-            "Ensure ScriptLite PHP classes are autoloaded.", 0);
+        zend_throw_exception(spl_ce_RuntimeException,
+            "Failed to initialize ScriptLite AST type cache.", 0);
         return NULL;
     }
 
-    zval parser_obj;
-    zval source_arg;
-    zval parsed;
-    ZVAL_UNDEF(&parser_obj);
-    ZVAL_UNDEF(&source_arg);
-    ZVAL_UNDEF(&parsed);
+    zval native_program;
+    ZVAL_UNDEF(&native_program);
 
-    object_init_ex(&parser_obj, SL_G(ce_parser));
-    ZVAL_STR_COPY(&source_arg, source);
-
-    zend_call_method_with_1_params(
-        Z_OBJ(parser_obj), SL_G(ce_parser), NULL, "__construct", NULL, &source_arg
-    );
-    if (EG(exception)) {
-        goto fail;
-    }
-
-    zval *parsed_ret = zend_call_method_with_0_params(
-        Z_OBJ(parser_obj), SL_G(ce_parser), NULL, "parse", &parsed
-    );
-
-    if (EG(exception) || !parsed_ret || !sl_ast_is(parsed_ret, SL_G(ast_cache).ce_program)) {
-        if (!EG(exception)) {
+    sl_parse_status native_status = sl_native_parse_source(source, &native_program);
+    if (native_status != SL_PARSE_STATUS_OK) {
+        if (Z_TYPE(native_program) != IS_UNDEF) {
+            zval_ptr_dtor(&native_program);
+        }
+        if (native_status == SL_PARSE_STATUS_UNSUPPORTED) {
             zend_throw_exception(
-                zend_ce_type_error,
-                "Parser did not return ScriptLite\\Ast\\Program", 0
+                spl_ce_RuntimeException,
+                "Native C parser does not support this JavaScript syntax yet.",
+                0
+            );
+        } else {
+            zend_throw_exception(
+                spl_ce_RuntimeException,
+                "Native C parser failed to parse the JavaScript source.",
+                0
             );
         }
-        goto fail;
+        return NULL;
     }
 
-    zval_ptr_dtor(&source_arg);
-    zval_ptr_dtor(&parser_obj);
+    if (!sl_ast_is(&native_program, SL_G(ast_cache).ce_program)) {
+        if (Z_TYPE(native_program) != IS_UNDEF) {
+            zval_ptr_dtor(&native_program);
+        }
+        zend_throw_exception(
+            zend_ce_type_error,
+            "Native C parser did not return a Program AST node.",
+            0
+        );
+        return NULL;
+    }
 
-    sl_compiled_script *script = sl_compile_ast(&parsed);
-    zval_ptr_dtor(&parsed);
+    sl_compiled_script *script = sl_compile_ast(&native_program);
+    zval_ptr_dtor(&native_program);
 
     if (!script) {
-        zend_throw_exception(zend_ce_exception,
-            "Compilation failed", 0);
+        zend_throw_exception(spl_ce_RuntimeException, "Compilation failed", 0);
         return NULL;
     }
 
     return script;
-
-fail:
-    if (Z_TYPE(parsed) != IS_UNDEF) {
-        zval_ptr_dtor(&parsed);
-    }
-    if (Z_TYPE(source_arg) != IS_UNDEF) {
-        zval_ptr_dtor(&source_arg);
-    }
-    if (Z_TYPE(parser_obj) != IS_UNDEF) {
-        zval_ptr_dtor(&parser_obj);
-    }
-    return NULL;
 }
 
 /* ============================================================
@@ -824,8 +717,7 @@ PHP_METHOD(ScriptLiteExt_Compiler, compile) {
     /* Ensure AST cache is initialized */
     if (!sl_ast_cache_init()) {
         zend_throw_exception(zend_ce_exception,
-            "Failed to initialize ScriptLite AST class cache. "
-            "Ensure ScriptLite PHP classes are autoloaded.", 0);
+            "Failed to initialize ScriptLite AST type cache.", 0);
         RETURN_THROWS();
     }
 
@@ -1280,11 +1172,12 @@ PHP_MSHUTDOWN_FUNCTION(scriptlite) {
 
 PHP_RINIT_FUNCTION(scriptlite) {
     SL_G(ast_cache_initialized) = false;
-    SL_G(parser_cache_initialized) = false;
+    SL_G(ast_synthetic_entries) = NULL;
     return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(scriptlite) {
+    sl_ast_cache_shutdown();
     return SUCCESS;
 }
 
@@ -1292,7 +1185,7 @@ PHP_MINFO_FUNCTION(scriptlite) {
     php_info_print_table_start();
     php_info_print_table_header(2, "ScriptLite Native Extension", "enabled");
     php_info_print_table_row(2, "Version", PHP_SCRIPTLITE_VERSION);
-    php_info_print_table_row(2, "Components", "Compiler + VM + Embedded Parser Runtime (all in C extension)");
+    php_info_print_table_row(2, "Components", "Compiler + VM + Native C Parser");
     php_info_print_table_end();
 }
 
