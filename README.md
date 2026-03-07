@@ -1,3 +1,6 @@
+<img width="2752" height="1536" alt="Image" src="https://github.com/user-attachments/assets/ec64e2bd-520b-4b1e-bdbd-d15cff817544" />
+
+
 # ScriptLite
 
 A sandboxed interpreter for a subset of ECMAScript, written in PHP. Embed user-provided scripts in your PHP application for data processing, configuration logic, computed fields, template expressions, workflow rules, and more — without giving scripts access to the filesystem, network, database, or any PHP internals. It covers the most useful parts of the language (variables, functions, closures, arrays, objects, regex, error handling, destructuring, etc.) while intentionally omitting modules, classes, async/await, generators, and other heavy runtime features.
