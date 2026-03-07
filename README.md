@@ -1,4 +1,4 @@
-<img width="2752" height="1536" alt="Image" src="https://github.com/user-attachments/assets/ec64e2bd-520b-4b1e-bdbd-d15cff817544" />
+![Image](https://github.com/user-attachments/assets/20005eaf-cea3-45c7-99f5-f068175b2b41)
 
 
 # ScriptLite
