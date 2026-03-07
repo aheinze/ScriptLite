@@ -15,9 +15,9 @@ Scripts run in a sealed environment: they can only use the ECMAScript built-ins 
 
 ### Execution backends
 
-- **C extension** — native bytecode VM with computed-goto dispatch (~130x faster than the PHP VM, ~3.5x faster than the transpiler)
+- **C extension** — native bytecode VM with computed-goto dispatch (~180x faster than the PHP VM, ~4.5x faster than the transpiler)
 - **Bytecode VM** — a stack-based virtual machine with 62 opcodes and register file optimization
-- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~31x faster than the PHP VM)
+- **PHP transpiler** — compiles ECMAScript to PHP source that OPcache/JIT can optimize natively (~40x faster than the PHP VM)
 
 ## Installation
 
@@ -27,7 +27,7 @@ composer require aheinze/scriptlite
 
 Requires **PHP 8.3+**. No external dependencies for the pure-PHP backends.
 
-For the optional C extension (130x faster VM), see [C extension](#c-extension) below.
+For the optional C extension (~180x faster VM), see [C extension](#c-extension) below.
 
 ## Quick start
 
@@ -255,6 +255,14 @@ $engine = new Engine(false); // force PHP VM/transpiler, ignore extension
 
 The extension registers its classes under the `ScriptLiteExt\` namespace (`Engine`, `Compiler`, `VirtualMachine`, `CompiledScript`) to avoid conflicts with the userland `ScriptLite\` namespace. Legacy `ScriptLiteNative\` aliases are provided for backward compatibility.
 
+### Install via PHP PIE
+
+The extension is available as a standalone package at [aheinze/ScriptLiteExt](https://github.com/aheinze/ScriptLiteExt):
+
+```bash
+pie install aheinze/scriptlite-ext
+```
+
 ### Building from source
 
 Requires PHP 8.3+ development headers (`php-dev` / `php-devel`), `libpcre2-dev`, and a C11 compiler.
@@ -381,17 +389,17 @@ Runs 10 workloads (fibonacci, sieve, quicksort, string ops, closures, objects/ve
 
 | Benchmark | PHP VM | Transpiler | C Extension | C/VM | C/Tr |
 |---|---|---|---|---|---|
-| fibonacci(25) | 2231 ms | 54 ms | 16.8 ms | **133x** | 3.2x |
-| sieve(5000) | 145 ms | 1.5 ms | 0.94 ms | **154x** | 1.6x |
-| matrix(3x3x50) | 33.3 ms | 0.27 ms | 0.23 ms | **146x** | 1.2x |
-| closures(5k) | 73.1 ms | 1.9 ms | 0.54 ms | **135x** | 3.6x |
-| pipeline(500) | 14.3 ms | 0.81 ms | 0.13 ms | **110x** | 6.2x |
-| tree(depth=10) | 73.8 ms | 2.9 ms | 0.81 ms | **91x** | 3.6x |
-| quicksort(200) | 48.1 ms | 1.8 ms | 0.56 ms | **86x** | 3.3x |
-| objects+vectors | 25.3 ms | 2.1 ms | 0.31 ms | **82x** | 6.7x |
-| string ops | 3.7 ms | 0.15 ms | 0.12 ms | **31x** | 1.3x |
-| regex(200iter) | 6.0 ms | 0.77 ms | 0.57 ms | **11x** | 1.3x |
-| **Total** | **2654 ms** | **67 ms** | **21 ms** | **126x** | **3.2x** |
+| fibonacci(25) | 2190 ms | 54 ms | 10.8 ms | **202x** | 5.0x |
+| sieve(5000) | 145 ms | 1.5 ms | 0.91 ms | **159x** | 1.6x |
+| matrix(3x3x50) | 32.8 ms | 0.27 ms | 0.20 ms | **163x** | 1.3x |
+| closures(5k) | 72.1 ms | 1.9 ms | 0.41 ms | **175x** | 4.6x |
+| pipeline(500) | 14.2 ms | 0.79 ms | 0.12 ms | **118x** | 6.6x |
+| tree(depth=10) | 71.8 ms | 2.97 ms | 0.85 ms | **84x** | 3.5x |
+| quicksort(200) | 48.5 ms | 1.8 ms | 0.42 ms | **117x** | 4.4x |
+| objects+vectors | 25.0 ms | 2.0 ms | 0.30 ms | **83x** | 6.8x |
+| string ops | 3.6 ms | 0.15 ms | 0.09 ms | **40x** | 1.7x |
+| regex(200iter) | 5.9 ms | 0.77 ms | 0.50 ms | **12x** | 1.5x |
+| **Total** | **2608 ms** | **66 ms** | **14.6 ms** | **178x** | **4.5x** |
 
 ### Execution modes (combined workload)
 
