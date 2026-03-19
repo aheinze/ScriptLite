@@ -96,6 +96,9 @@ enum OpCode: int
     case GetPropertyOpt = 84;  // Optional chaining: like GetProperty but pushes undefined if object is null/undefined
     case ArrayPush   = 85;  // Pop value, push onto JsArray at TOS-1
     case ArraySpread = 86;  // Pop iterable, spread elements into JsArray at TOS-1
+    case GetNamedProperty = 87;  // Pop object, push object.name (operand = name index)
+    case SetNamedProperty = 88;  // Pop value, pop object, set object.name=value, push value
+    case GetNamedPropertyOpt = 89; // Optional chaining for named property reads
 
     // Special
     case Halt        = 99;  // Stop execution

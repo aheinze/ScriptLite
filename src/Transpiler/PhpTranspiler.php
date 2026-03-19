@@ -714,6 +714,7 @@ final class PhpTranspiler
     private function emitUpdateVoid(UpdateExpr $e): string
     {
         $sign = $e->operator === '++' ? '+' : '-';
+        $increment = $e->operator === '++' ? 'true' : 'false';
 
         if ($e->argument instanceof Identifier) {
             $var = '$' . $this->resolveVar($e->argument->name);
@@ -727,21 +728,21 @@ final class PhpTranspiler
         }
 
         if ($e->argument instanceof MemberExpr) {
-            $key = $e->argument->computed
-                ? $this->emitExpr($e->argument->property)
-                : "'" . $e->argument->property->name . "'";
-
             if ($e->argument->object instanceof Identifier || $e->argument->object instanceof ThisExpr) {
                 $obj = $e->argument->object instanceof ThisExpr
                     ? '$__this'
                     : '$' . $this->resolveVar($e->argument->object->name);
 
-                return "{$obj}[{$key}] = " . self::OPS . "::toNumber({$obj}[{$key}]) {$sign} 1";
+                if (!$e->argument->computed && $e->argument->property instanceof Identifier) {
+                    $key = "'" . $e->argument->property->name . "'";
+                    return "{$obj}[{$key}] = " . self::OPS . "::toNumber({$obj}[{$key}]) {$sign} 1";
+                }
+
+                $key = $this->emitExpr($e->argument->property);
+                return self::OPS . "::updateProp({$obj}, {$key}, {$increment}, true)";
             }
 
-            $obj = $this->emitExpr($e->argument->object);
-            $op = $e->operator === '++' ? '++' : '--';
-            return $e->prefix ? "{$op}{$obj}[{$key}]" : "{$obj}[{$key}]{$op}";
+            return $this->emitCachedMemberUpdate($e, true);
         }
 
         // Fallback: use the full IIFE version
@@ -750,6 +751,8 @@ final class PhpTranspiler
 
     private function emitUpdate(UpdateExpr $e): string
     {
+        $increment = $e->operator === '++' ? 'true' : 'false';
+
         if ($e->argument instanceof Identifier) {
             $var = '$' . $this->resolveVar($e->argument->name);
             if ($this->inferFromName($e->argument->name) === TypeHint::Numeric) {
@@ -765,28 +768,26 @@ final class PhpTranspiler
                 . 'return ' . ($e->prefix ? $var : $old) . '; })()';
         }
         if ($e->argument instanceof MemberExpr) {
-            $key = $e->argument->computed
-                ? $this->emitExpr($e->argument->property)
-                : "'" . $e->argument->property->name . "'";
-
             if ($e->argument->object instanceof Identifier || $e->argument->object instanceof ThisExpr) {
                 $obj = $e->argument->object instanceof ThisExpr
                     ? '$__this'
                     : '$' . $this->resolveVar($e->argument->object->name);
-                $old = '$__u' . $this->tmpId++;
-                $keyVar = '$__uk' . $this->tmpId++;
-                $sign = $e->operator === '++' ? '+' : '-';
 
-                return '(function() use (&' . $obj . ') { '
-                    . $keyVar . ' = ' . $key . '; '
-                    . $old . ' = ' . $obj . '[' . $keyVar . ']; '
-                    . $obj . '[' . $keyVar . '] = ' . self::OPS . '::toNumber(' . $old . ') ' . $sign . ' 1; '
-                    . 'return ' . ($e->prefix ? $obj . '[' . $keyVar . ']' : $old) . '; })()';
+                if (!$e->argument->computed && $e->argument->property instanceof Identifier) {
+                    $key = "'" . $e->argument->property->name . "'";
+                    if ($e->prefix) {
+                        $sign = $e->operator === '++' ? '+' : '-';
+                        return "({$obj}[{$key}] = " . self::OPS . "::toNumber({$obj}[{$key}]) {$sign} 1)";
+                    }
+
+                    return self::OPS . "::updateNamedProp({$obj}, {$key}, {$increment}, false)";
+                }
+
+                $key = $this->emitExpr($e->argument->property);
+                return self::OPS . "::updateProp({$obj}, {$key}, {$increment}, " . ($e->prefix ? 'true' : 'false') . ")";
             }
 
-            $obj = $this->emitExpr($e->argument->object);
-            $op = $e->operator === '++' ? '++' : '--';
-            return $e->prefix ? "({$op}{$obj}[{$key}])" : "({$obj}[{$key}]{$op})";
+            return $this->emitCachedMemberUpdate($e, false);
         }
         throw new RuntimeException('Invalid update target');
     }
@@ -825,6 +826,158 @@ final class PhpTranspiler
     private function resolveVar(string $name): string
     {
         return $this->letRenames[$name] ?? $name;
+    }
+
+    private function emitCompoundAssignValueExpr(string $lhs, string $rhs, string $operator): string
+    {
+        if ($operator === '+=') {
+            return self::OPS . "::add({$lhs}, {$rhs})";
+        }
+        if ($operator === '??=') {
+            return "({$lhs} ?? {$rhs})";
+        }
+        if ($operator === '>>>=') {
+            return "(((int)({$lhs}) & 0xFFFFFFFF) >> ((int)({$rhs}) & 0x1F))";
+        }
+        if ($operator === '/=') {
+            return self::OPS . "::div({$lhs}, {$rhs})";
+        }
+        if ($operator === '%=') {
+            return self::OPS . "::mod({$lhs}, {$rhs})";
+        }
+
+        $op = match ($operator) {
+            '-=' => '-',
+            '*=' => '*',
+            '**=' => '**',
+            '&=' => '&',
+            '|=' => '|',
+            '^=' => '^',
+            '<<=' => '<<',
+            '>>=' => '>>',
+            default => throw new RuntimeException("Transpiler: unknown assign op {$operator}"),
+        };
+
+        return "({$lhs} {$op} {$rhs})";
+    }
+
+    private function makeUseClauseWith(array $extraVars): string
+    {
+        $vars = array_values(array_unique(array_merge(
+            array_map(
+                fn(string $name) => $this->resolveVar($name),
+                $this->getAllScopeVars()
+            ),
+            $extraVars,
+        )));
+
+        if (empty($vars)) {
+            return '';
+        }
+
+        $refs = array_map(fn(string $var) => '&$' . $var, $vars);
+        return ' use (' . implode(', ', $refs) . ')';
+    }
+
+    private function emitCachedMemberAssign(MemberAssignExpr $e, string $objCode, string $val, bool $simpleBase): string
+    {
+        $namedKey = (!$e->computed && $e->property instanceof Identifier) ? $e->property->name : null;
+        $keyExpr = $namedKey === null ? $this->emitExpr($e->property) : null;
+        $objVar = $simpleBase ? $objCode : '$__mo' . $this->tmpId++;
+        $keyVar = $keyExpr !== null ? '$__mk' . $this->tmpId++ : null;
+        $currentVar = '$__mc' . $this->tmpId++;
+        $rhsVar = '$__mr' . $this->tmpId++;
+        $extraUse = [];
+
+        if ($simpleBase && ($e->object instanceof Identifier || $e->object instanceof ThisExpr)) {
+            $extraUse[] = ltrim($objCode, '$');
+        }
+
+        $use = $this->makeUseClauseWith($extraUse);
+        $body = '';
+
+        if (!$simpleBase) {
+            $body .= "{$objVar} = {$objCode}; ";
+        }
+        if ($keyVar !== null) {
+            $body .= "{$keyVar} = {$keyExpr}; ";
+        }
+
+        $escapedKey = $namedKey !== null ? $this->escapeStr($namedKey) : null;
+        $readExpr = match (true) {
+            $simpleBase && $namedKey !== null => "{$objVar}[{$escapedKey}]",
+            $simpleBase => "{$objVar}[{$keyVar}]",
+            $namedKey !== null => self::OPS . "::getNamedProp({$objVar}, {$escapedKey})",
+            default => self::OPS . "::getProp({$objVar}, {$keyVar})",
+        };
+        $writeExpr = match (true) {
+            $simpleBase && $namedKey !== null => fn(string $valueExpr): string => "({$objVar}[{$escapedKey}] = {$valueExpr})",
+            $simpleBase => fn(string $valueExpr): string => "({$objVar}[{$keyVar}] = {$valueExpr})",
+            $namedKey !== null => fn(string $valueExpr): string => self::OPS . "::setNamedProp({$objVar}, {$escapedKey}, {$valueExpr})",
+            default => fn(string $valueExpr): string => self::OPS . "::setProp({$objVar}, {$keyVar}, {$valueExpr})",
+        };
+
+        if ($e->operator === '=') {
+            $body .= 'return ' . $writeExpr($val) . ';';
+            return "(function(){$use} { {$body} })()";
+        }
+
+        $body .= "{$currentVar} = {$readExpr}; ";
+
+        if ($e->operator === '??=') {
+            $body .= "if ({$currentVar} !== null) { return {$currentVar}; } ";
+            $body .= 'return ' . $writeExpr($val) . ';';
+            return "(function(){$use} { {$body} })()";
+        }
+
+        $body .= "{$rhsVar} = {$val}; ";
+        $body .= 'return ' . $writeExpr($this->emitCompoundAssignValueExpr($currentVar, $rhsVar, $e->operator)) . ';';
+
+        return "(function(){$use} { {$body} })()";
+    }
+
+    private function emitCachedMemberUpdate(UpdateExpr $e, bool $discardResult): string
+    {
+        $member = $e->argument;
+        assert($member instanceof MemberExpr);
+
+        $namedKey = (!$member->computed && $member->property instanceof Identifier) ? $member->property->name : null;
+        $objCode = match (true) {
+            $member->object instanceof ThisExpr => '$__this',
+            $member->object instanceof FunctionExpr => $this->emitFunctionExpr($member->object, forceBox: true),
+            default => $this->emitExpr($member->object),
+        };
+        $keyExpr = $namedKey === null ? $this->emitExpr($member->property) : null;
+        $objVar = '$__mo' . $this->tmpId++;
+        $keyVar = $keyExpr !== null ? '$__mk' . $this->tmpId++ : null;
+        $oldVar = '$__u' . $this->tmpId++;
+        $newVar = '$__un' . $this->tmpId++;
+        $use = $this->makeUseClause();
+        $body = "{$objVar} = {$objCode}; ";
+
+        if ($keyVar !== null) {
+            $body .= "{$keyVar} = {$keyExpr}; ";
+        }
+
+        $escapedKey = $namedKey !== null ? $this->escapeStr($namedKey) : null;
+        $readExpr = $namedKey !== null
+            ? self::OPS . "::getNamedProp({$objVar}, {$escapedKey})"
+            : self::OPS . "::getProp({$objVar}, {$keyVar})";
+        $writeExpr = $namedKey !== null
+            ? self::OPS . "::setNamedProp({$objVar}, {$escapedKey}, {$newVar})"
+            : self::OPS . "::setProp({$objVar}, {$keyVar}, {$newVar})";
+        $sign = $e->operator === '++' ? '+' : '-';
+
+        $body .= "{$oldVar} = {$readExpr}; ";
+        $body .= "{$newVar} = " . self::OPS . "::toNumber({$oldVar}) {$sign} 1; ";
+        $body .= "{$writeExpr}; ";
+        if ($discardResult) {
+            $body .= 'return null;';
+        } else {
+            $body .= 'return ' . ($e->prefix ? $newVar : $oldVar) . ';';
+        }
+
+        return "(function(){$use} { {$body} })()";
     }
 
     private function emitAssign(AssignExpr $e): string
@@ -1113,6 +1266,7 @@ final class PhpTranspiler
             $e->object instanceof FunctionExpr => $this->emitFunctionExpr($e->object, forceBox: true),
             default => $this->emitExpr($e->object),
         };
+        $simpleBase = $e->object instanceof Identifier || $e->object instanceof ThisExpr;
 
         if (!$e->computed && $e->property instanceof Identifier) {
             $key = "'" . $e->property->name . "'";
@@ -1122,6 +1276,10 @@ final class PhpTranspiler
 
         if ($e->operator === '=') {
             return "({$objCode}[{$key}] = {$val})";
+        }
+
+        if (!$simpleBase || $e->computed) {
+            return $this->emitCachedMemberAssign($e, $objCode, $val, $simpleBase);
         }
 
         // Compound assignment: obj[key] += val
@@ -2457,15 +2615,7 @@ final class PhpTranspiler
     /** Generate a use() clause capturing all scope variables by reference */
     private function makeUseClause(): string
     {
-        $vars = array_values(array_unique(array_map(
-            fn(string $name) => $this->resolveVar($name),
-            $this->getAllScopeVars()
-        )));
-        if (empty($vars)) {
-            return '';
-        }
-        $refs = array_map(fn($v) => '&$' . $v, $vars);
-        return ' use (' . implode(', ', $refs) . ')';
+        return $this->makeUseClauseWith([]);
     }
 
     /** Convert JS regex pattern+flags to a PCRE pattern string (PHP literal) */

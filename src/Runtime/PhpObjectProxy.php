@@ -25,6 +25,15 @@ use ReflectionMethod;
  */
 final class PhpObjectProxy implements \ArrayAccess
 {
+    /** @var array<string, NativeFunction> */
+    private array $vmMethodCache = [];
+
+    /** @var array<string, \Closure> */
+    private array $transpilerMethodCache = [];
+
+    /** @var array<string, array<int, array{builtin:?string, unwrapProxy:bool}>> */
+    private static array $signatureCache = [];
+
     public function __construct(
         public readonly object $target,
     ) {}
@@ -33,9 +42,13 @@ final class PhpObjectProxy implements \ArrayAccess
 
     public function get(string $key): mixed
     {
+        if (isset($this->vmMethodCache[$key])) {
+            return $this->vmMethodCache[$key];
+        }
+
         if (method_exists($this->target, $key)) {
             $target = $this->target;
-            return new NativeFunction($key, static function (mixed ...$args) use ($target, $key): mixed {
+            return $this->vmMethodCache[$key] = new NativeFunction($key, static function (mixed ...$args) use ($target, $key): mixed {
                 $args = self::coerceArgs($target, $key, $args);
                 return self::wrapForVm($target->$key(...$args));
             });
@@ -65,9 +78,13 @@ final class PhpObjectProxy implements \ArrayAccess
     {
         $key = (string) $offset;
 
+        if (isset($this->transpilerMethodCache[$key])) {
+            return $this->transpilerMethodCache[$key];
+        }
+
         if (method_exists($this->target, $key)) {
             $target = $this->target;
-            return static function (mixed ...$args) use ($target, $key): mixed {
+            return $this->transpilerMethodCache[$key] = static function (mixed ...$args) use ($target, $key): mixed {
                 $args = self::coerceArgs($target, $key, $args);
                 return self::wrapForTranspiler($target->$key(...$args));
             };
@@ -136,20 +153,15 @@ final class PhpObjectProxy implements \ArrayAccess
 
     private static function coerceArgs(object $target, string $method, array $args): array
     {
-        $ref = new ReflectionMethod($target, $method);
-        $params = $ref->getParameters();
+        $cacheKey = get_class($target) . '::' . $method;
+        $params = self::$signatureCache[$cacheKey] ??= self::buildSignaturePlan($target, $method);
 
         foreach ($params as $i => $param) {
             if (!array_key_exists($i, $args)) {
                 break;
             }
-            $type = $param->getType();
-            if (!$type instanceof \ReflectionNamedType) {
-                continue;
-            }
-            $name = $type->getName();
-            if ($type->isBuiltin()) {
-                $args[$i] = match ($name) {
+            if ($param['builtin'] !== null) {
+                $args[$i] = match ($param['builtin']) {
                     'int'    => (int) $args[$i],
                     'float'  => (float) $args[$i],
                     'string' => (string) $args[$i],
@@ -157,12 +169,36 @@ final class PhpObjectProxy implements \ArrayAccess
                     'array'  => (array) $args[$i],
                     default  => $args[$i],
                 };
-            } elseif ($args[$i] instanceof self) {
+            } elseif ($param['unwrapProxy'] && $args[$i] instanceof self) {
                 // Unwrap proxy when PHP method expects a typed object
                 $args[$i] = $args[$i]->target;
             }
         }
 
         return $args;
+    }
+
+    /**
+     * @return array<int, array{builtin:?string, unwrapProxy:bool}>
+     */
+    private static function buildSignaturePlan(object $target, string $method): array
+    {
+        $ref = new ReflectionMethod($target, $method);
+        $plan = [];
+
+        foreach ($ref->getParameters() as $param) {
+            $type = $param->getType();
+            if (!$type instanceof \ReflectionNamedType) {
+                $plan[] = ['builtin' => null, 'unwrapProxy' => false];
+                continue;
+            }
+
+            $plan[] = [
+                'builtin' => $type->isBuiltin() ? $type->getName() : null,
+                'unwrapProxy' => !$type->isBuiltin(),
+            ];
+        }
+
+        return $plan;
     }
 }

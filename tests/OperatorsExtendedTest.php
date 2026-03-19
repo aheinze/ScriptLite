@@ -83,6 +83,83 @@ class OperatorsExtendedTest extends ScriptLiteTestCase
         $this->assertBothBackends('var a = [1, 2, 3]; ++a[0]', 2);
     }
 
+    public function testCompoundAssignEvaluatesMemberBaseOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var holder = { value: 1 };
+            function getHolder() { calls++; return holder; }
+            getHolder().value += 2;
+            "" + calls + ":" + holder.value
+        ', '1:3');
+    }
+
+    public function testCompoundAssignEvaluatesComputedKeyOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var values = [10];
+            function idx() { calls++; return 0; }
+            values[idx()] += 5;
+            "" + calls + ":" + values[0]
+        ', '1:15');
+    }
+
+    public function testPostfixIncrementEvaluatesMemberBaseOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var holder = { value: 1 };
+            function getHolder() { calls++; return holder; }
+            var old = getHolder().value++;
+            "" + calls + ":" + old + ":" + holder.value
+        ', '1:1:2');
+    }
+
+    public function testPostfixIncrementEvaluatesComputedKeyOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var values = [10];
+            function idx() { calls++; return 0; }
+            var old = values[idx()]++;
+            "" + calls + ":" + old + ":" + values[0]
+        ', '1:10:11');
+    }
+
+    public function testPostfixIncrementStatementEvaluatesComputedKeyOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var values = [10];
+            function idx() { calls++; return 0; }
+            values[idx()]++;
+            "" + calls + ":" + values[0]
+        ', '1:11');
+    }
+
+    public function testPrefixIncrementStatementEvaluatesComputedKeyOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var values = [10];
+            function idx() { calls++; return 0; }
+            ++values[idx()];
+            "" + calls + ":" + values[0]
+        ', '1:11');
+    }
+
+    public function testNullishAssignEvaluatesMemberBaseOnce(): void
+    {
+        $this->assertBothBackends('
+            var calls = 0;
+            var holder = { value: null };
+            function getHolder() { calls++; return holder; }
+            getHolder().value ??= 7;
+            "" + calls + ":" + holder.value
+        ', '1:7');
+    }
+
     // ═══════════════════ ++/-- in expressions ═══════════════════
 
     public function testPrefixIncrementInExpr(): void

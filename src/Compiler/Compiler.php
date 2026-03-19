@@ -366,8 +366,7 @@ final class Compiler
         // Condition: __forof_idx < __forof_arr.length
         $this->emit(OpCode::GetLocal, $idxName);
         $this->emit(OpCode::GetLocal, $arrName);
-        $this->emit(OpCode::Const, $this->addConstant('length'));
-        $this->emit(OpCode::GetProperty);
+        $this->emit(OpCode::GetNamedProperty, $this->addName('length'));
         $this->emit(OpCode::Lt);
         $exitJump = $this->emitJump(OpCode::JumpIfFalse);
 
@@ -422,8 +421,7 @@ final class Compiler
         // Push Object.keys(object) to get array of keys
         $uid = $this->tempCounter++;
         $this->emit(OpCode::GetLocal, $this->addName('Object'));
-        $this->emit(OpCode::Const, $this->addConstant('keys'));
-        $this->emit(OpCode::GetProperty);
+        $this->emit(OpCode::GetNamedProperty, $this->addName('keys'));
         $this->compileExpr($stmt->object);
         $this->emit(OpCode::Call, 1);
         $arrName = $this->addName("__forin_arr{$uid}");
@@ -441,8 +439,7 @@ final class Compiler
         // Condition: __forin_idx < __forin_arr.length
         $this->emit(OpCode::GetLocal, $idxName);
         $this->emit(OpCode::GetLocal, $arrName);
-        $this->emit(OpCode::Const, $this->addConstant('length'));
-        $this->emit(OpCode::GetProperty);
+        $this->emit(OpCode::GetNamedProperty, $this->addName('length'));
         $this->emit(OpCode::Lt);
         $exitJump = $this->emitJump(OpCode::JumpIfFalse);
 
@@ -502,10 +499,10 @@ final class Compiler
             $this->emit(OpCode::GetLocal, $srcName);
             if ($isArray) {
                 $this->emit(OpCode::Const, $this->addConstant((float) $binding['source']));
+                $this->emit(OpCode::GetProperty);
             } else {
-                $this->emit(OpCode::Const, $this->addConstant($binding['source']));
+                $this->emit(OpCode::GetNamedProperty, $this->addName((string) $binding['source']));
             }
-            $this->emit(OpCode::GetProperty);
 
             // Default value handling
             if ($binding['default'] !== null) {
@@ -540,8 +537,7 @@ final class Compiler
         // Handle rest element
         if ($restName !== null && $isArray) {
             $this->emit(OpCode::GetLocal, $srcName);
-            $this->emit(OpCode::Const, $this->addConstant('slice'));
-            $this->emit(OpCode::GetProperty);
+            $this->emit(OpCode::GetNamedProperty, $this->addName('slice'));
             $this->emit(OpCode::Const, $this->addConstant((float) count($bindings)));
             $this->emit(OpCode::Call, 1);
             if (isset($this->regMap[$restName])) {
@@ -903,70 +899,51 @@ final class Compiler
     private function compileMemberExpr(MemberExpr $expr): void
     {
         $this->compileExpr($expr->object);
+        $useOpt = $expr->optional || $expr->optionalChain;
         if ($expr->computed) {
             $this->compileExpr($expr->property);
-        } else {
-            // Non-computed: property is an Identifier, push its name as string constant
-            assert($expr->property instanceof Identifier);
-            $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
+            $this->emit($useOpt ? OpCode::GetPropertyOpt : OpCode::GetProperty);
+            return;
         }
-        $useOpt = $expr->optional || $expr->optionalChain;
-        $this->emit($useOpt ? OpCode::GetPropertyOpt : OpCode::GetProperty);
+
+        assert($expr->property instanceof Identifier);
+        $this->emit(
+            $useOpt ? OpCode::GetNamedPropertyOpt : OpCode::GetNamedProperty,
+            $this->addName($expr->property->name)
+        );
     }
 
     private function compileMemberAssign(MemberAssignExpr $expr): void
     {
-        $this->compileExpr($expr->object);
-        if ($expr->computed) {
-            $this->compileExpr($expr->property);
-        } else {
-            assert($expr->property instanceof Identifier);
-            $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
-        }
+        $ref = $this->captureMemberReference($expr->object, $expr->property, $expr->computed);
 
         if ($expr->operator === '=') {
+            $this->emitCapturedMemberTarget($ref);
             $this->compileExpr($expr->value);
+            $this->emitStoreCapturedMemberValue($ref);
+            return;
         } else {
             if ($expr->operator === '??=') {
                 // Short-circuit: obj[key] ??= val
                 // Read current → if not nullish, skip assignment
-                $this->compileExpr($expr->object);
-                if ($expr->computed) {
-                    $this->compileExpr($expr->property);
-                } else {
-                    assert($expr->property instanceof Identifier);
-                    $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
-                }
-                $this->emit(OpCode::GetProperty);
+                $this->emitCapturedMemberValue($ref);
                 $this->emit(OpCode::Dup);
                 $skip = $this->emitJump(OpCode::JumpIfNotNullish);
                 $this->emit(OpCode::Pop); // discard old value
 
-                // Re-emit obj+key for SetProperty
-                $this->compileExpr($expr->object);
-                if ($expr->computed) {
-                    $this->compileExpr($expr->property);
-                } else {
-                    assert($expr->property instanceof Identifier);
-                    $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
-                }
+                // Reuse cached obj+key for SetProperty
+                $this->emitCapturedMemberTarget($ref);
                 $this->compileExpr($expr->value);
-                $this->emit(OpCode::SetProperty);
+                $this->emitStoreCapturedMemberValue($ref);
                 $this->patchJump($skip);
                 return;
             }
 
             // Compound assignment: obj[key] += val
-            // Stack: [obj, key]. Re-evaluate object+key for the read (GetProperty).
+            // Stack: [obj, key]. Reuse cached object/key for the read.
             // After GetProperty + compute, SetProperty consumes [obj, key, newVal].
-            $this->compileExpr($expr->object);
-            if ($expr->computed) {
-                $this->compileExpr($expr->property);
-            } else {
-                assert($expr->property instanceof Identifier);
-                $this->emit(OpCode::Const, $this->addConstant($expr->property->name));
-            }
-            $this->emit(OpCode::GetProperty);
+            $this->emitCapturedMemberTarget($ref);
+            $this->emitCapturedMemberValue($ref);
             $this->compileExpr($expr->value);
             $op = match ($expr->operator) {
                 '+='   => OpCode::Add,
@@ -986,7 +963,7 @@ final class Compiler
             $this->emit($op);
         }
 
-        $this->emit(OpCode::SetProperty); // pops value, key, obj → pushes value
+        $this->emitStoreCapturedMemberValue($ref); // pops value, key, obj → pushes value
     }
 
     private function compileIdentifier(Identifier $id): void
@@ -1074,37 +1051,99 @@ final class Compiler
                 $emitSet();
             }
         } elseif ($expr->argument instanceof MemberExpr) {
-            $emitObjKey = function () use ($expr): void {
-                $this->compileExpr($expr->argument->object);
-                if ($expr->argument->computed) {
-                    $this->compileExpr($expr->argument->property);
-                } else {
-                    assert($expr->argument->property instanceof Identifier);
-                    $this->emit(OpCode::Const, $this->addConstant($expr->argument->property->name));
-                }
-            };
+            $ref = $this->captureMemberReference(
+                $expr->argument->object,
+                $expr->argument->property,
+                $expr->argument->computed
+            );
 
             if ($expr->prefix) {
                 // ++obj.x: [obj, key] for SetProperty, then get+inc as value
-                $emitObjKey();        // stack: [obj, key]
-                $emitObjKey();        // stack: [obj, key, obj, key]
-                $this->emit(OpCode::GetProperty); // stack: [obj, key, old]
+                $this->emitCapturedMemberTarget($ref); // stack: [obj, key]
+                $this->emitCapturedMemberValue($ref);  // stack: [obj, key, old]
                 $this->emit(OpCode::Const, $this->addConstant(1));
                 $this->emit($incOp);  // stack: [obj, key, new]
-                $this->emit(OpCode::SetProperty); // pops [obj,key,new], pushes new
+                $this->emitStoreCapturedMemberValue($ref); // pops [obj,key,new], pushes new
             } else {
                 // obj.x++: need old value as result
-                $emitObjKey();
-                $this->emit(OpCode::GetProperty); // stack: [old]
-                $emitObjKey();        // stack: [old, obj, key]
-                $emitObjKey();        // stack: [old, obj, key, obj, key]
-                $this->emit(OpCode::GetProperty); // stack: [old, obj, key, old2]
+                $uid = $this->tempCounter++;
+                $oldName = $this->addName("__member_old{$uid}");
+                $this->emitCapturedMemberTarget($ref); // stack: [obj, key]
+                $this->emitCapturedMemberValue($ref);  // stack: [obj, key, old]
+                $this->emit(OpCode::Dup);             // stack: [obj, key, old, old]
+                $this->emit(OpCode::DefineVar, $oldName, 0); // stack: [obj, key, old]
                 $this->emit(OpCode::Const, $this->addConstant(1));
-                $this->emit($incOp);  // stack: [old, obj, key, new]
-                $this->emit(OpCode::SetProperty); // stack: [old, new]
-                $this->emit(OpCode::Pop); // stack: [old]
+                $this->emit($incOp);                // stack: [obj, key, new]
+                $this->emitStoreCapturedMemberValue($ref); // stack: [new]
+                $this->emit(OpCode::Pop);
+                $this->emit(OpCode::GetLocal, $oldName); // stack: [old]
             }
         }
+    }
+
+    /**
+     * @return array{objectName:int, keyName?:int, propertyName?:int}
+     */
+    private function captureMemberReference(Expr $object, Expr $property, bool $computed): array
+    {
+        $uid = $this->tempCounter++;
+
+        $this->compileExpr($object);
+        $objectName = $this->addName("__member_obj{$uid}");
+        $this->emit(OpCode::DefineVar, $objectName, 0);
+
+        if ($computed) {
+            $this->compileExpr($property);
+            $keyName = $this->addName("__member_key{$uid}");
+            $this->emit(OpCode::DefineVar, $keyName, 0);
+            return ['objectName' => $objectName, 'keyName' => $keyName];
+        }
+
+        assert($property instanceof Identifier);
+
+        return [
+            'objectName' => $objectName,
+            'propertyName' => $this->addName($property->name),
+        ];
+    }
+
+    /**
+     * @param array{objectName:int, keyName?:int, propertyName?:int} $ref
+     */
+    private function emitCapturedMemberTarget(array $ref): void
+    {
+        $this->emit(OpCode::GetLocal, $ref['objectName']);
+        if (isset($ref['keyName'])) {
+            $this->emit(OpCode::GetLocal, $ref['keyName']);
+        }
+    }
+
+    /**
+     * @param array{objectName:int, keyName?:int, propertyName?:int} $ref
+     */
+    private function emitCapturedMemberValue(array $ref): void
+    {
+        $this->emit(OpCode::GetLocal, $ref['objectName']);
+        if (isset($ref['propertyName'])) {
+            $this->emit(OpCode::GetNamedProperty, $ref['propertyName']);
+            return;
+        }
+
+        $this->emit(OpCode::GetLocal, $ref['keyName']);
+        $this->emit(OpCode::GetProperty);
+    }
+
+    /**
+     * @param array{objectName:int, keyName?:int, propertyName?:int} $ref
+     */
+    private function emitStoreCapturedMemberValue(array $ref): void
+    {
+        if (isset($ref['propertyName'])) {
+            $this->emit(OpCode::SetNamedProperty, $ref['propertyName']);
+            return;
+        }
+
+        $this->emit(OpCode::SetProperty);
     }
 
     private function compileVoid(VoidExpr $expr): void

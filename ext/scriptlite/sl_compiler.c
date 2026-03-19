@@ -1889,37 +1889,55 @@ static void sl_compile_update(sl_compiler *c, zval *expr) {
         zval *obj = sl_ast_prop(arg, SL_G(str_object));
         zval *prop = sl_ast_prop(arg, SL_G(str_property));
         bool computed = sl_ast_prop_bool(arg, SL_G(str_computed));
+        zend_string *pname = NULL;
 
-        /* Helper macros to emit obj+key */
-        #define EMIT_OBJ_KEY() do { \
-            sl_compile_expr(c, obj); \
+        zend_string *obj_tmp = sl_make_temp_name("__member_obj");
+        uint32_t obj_name = sl_emit_name(c, obj_tmp);
+        sl_compile_expr(c, obj);
+        sl_emit(c, SL_OP_DEFINE_VAR, (int32_t)obj_name, 0);
+
+        uint32_t key_name = 0;
+        if (computed) {
+            zend_string *key_tmp = sl_make_temp_name("__member_key");
+            key_name = sl_emit_name(c, key_tmp);
+            sl_compile_expr(c, prop);
+            sl_emit(c, SL_OP_DEFINE_VAR, (int32_t)key_name, 0);
+        } else {
+            pname = sl_ast_prop_str(prop, SL_G(str_name));
+        }
+
+        /* Helper macro to reuse cached obj+key */
+        #define EMIT_CAPTURED_OBJ_KEY() do { \
+            sl_emit(c, SL_OP_GET_LOCAL, (int32_t)obj_name, 0); \
             if (computed) { \
-                sl_compile_expr(c, prop); \
-            } else { \
-                zend_string *pname = sl_ast_prop_str(prop, SL_G(str_name)); \
-                if (pname) sl_emit_const(c, sl_val_string(zend_string_copy(pname))); \
+                sl_emit(c, SL_OP_GET_LOCAL, (int32_t)key_name, 0); \
+            } else if (pname) { \
+                sl_emit_const(c, sl_val_string(zend_string_copy(pname))); \
             } \
         } while(0)
 
         if (prefix) {
-            EMIT_OBJ_KEY();
-            EMIT_OBJ_KEY();
+            EMIT_CAPTURED_OBJ_KEY();
+            EMIT_CAPTURED_OBJ_KEY();
             sl_emit(c, SL_OP_GET_PROPERTY, 0, 0);
             sl_emit_const(c, sl_val_int(1));
             sl_emit(c, inc_op, 0, 0);
             sl_emit(c, SL_OP_SET_PROPERTY, 0, 0);
         } else {
-            EMIT_OBJ_KEY();
+            zend_string *old_tmp = sl_make_temp_name("__member_old");
+            uint32_t old_name = sl_emit_name(c, old_tmp);
+            EMIT_CAPTURED_OBJ_KEY();
+            EMIT_CAPTURED_OBJ_KEY();
             sl_emit(c, SL_OP_GET_PROPERTY, 0, 0);
-            EMIT_OBJ_KEY();
-            EMIT_OBJ_KEY();
-            sl_emit(c, SL_OP_GET_PROPERTY, 0, 0);
+            sl_emit(c, SL_OP_DUP, 0, 0);
+            sl_emit(c, SL_OP_DEFINE_VAR, (int32_t)old_name, 0);
             sl_emit_const(c, sl_val_int(1));
             sl_emit(c, inc_op, 0, 0);
             sl_emit(c, SL_OP_SET_PROPERTY, 0, 0);
             sl_emit(c, SL_OP_POP, 0, 0);
+            sl_emit(c, SL_OP_GET_LOCAL, (int32_t)old_name, 0);
         }
-        #undef EMIT_OBJ_KEY
+        #undef EMIT_CAPTURED_OBJ_KEY
     }
 }
 
@@ -2124,15 +2142,30 @@ static void sl_compile_member_assign(sl_compiler *c, zval *expr) {
     bool computed = sl_ast_prop_bool(expr, SL_G(str_computed));
     zend_string *op = sl_ast_prop_str(expr, SL_G(str_operator));
     zval *val = sl_ast_prop(expr, SL_G(str_value));
+    zend_string *pname = NULL;
+    uint32_t key_name = 0;
 
-    /* Helper to emit obj+key */
-    #define EMIT_MBR_OBJ_KEY() do { \
-        sl_compile_expr(c, obj); \
+    zend_string *obj_tmp = sl_make_temp_name("__member_obj");
+    uint32_t obj_name = sl_emit_name(c, obj_tmp);
+    sl_compile_expr(c, obj);
+    sl_emit(c, SL_OP_DEFINE_VAR, (int32_t)obj_name, 0);
+
+    if (computed) {
+        zend_string *key_tmp = sl_make_temp_name("__member_key");
+        key_name = sl_emit_name(c, key_tmp);
+        sl_compile_expr(c, prop);
+        sl_emit(c, SL_OP_DEFINE_VAR, (int32_t)key_name, 0);
+    } else {
+        pname = sl_ast_prop_str(prop, SL_G(str_name));
+    }
+
+    /* Helper to reuse cached obj+key */
+    #define EMIT_CAPTURED_MBR_OBJ_KEY() do { \
+        sl_emit(c, SL_OP_GET_LOCAL, (int32_t)obj_name, 0); \
         if (computed) { \
-            sl_compile_expr(c, prop); \
-        } else { \
-            zend_string *pn = sl_ast_prop_str(prop, SL_G(str_name)); \
-            if (pn) sl_emit_const(c, sl_val_string(zend_string_copy(pn))); \
+            sl_emit(c, SL_OP_GET_LOCAL, (int32_t)key_name, 0); \
+        } else if (pname) { \
+            sl_emit_const(c, sl_val_string(zend_string_copy(pname))); \
         } \
     } while(0)
 
@@ -2140,35 +2173,34 @@ static void sl_compile_member_assign(sl_compiler *c, zval *expr) {
 
     if (ZSTR_LEN(op) == 1 && ZSTR_VAL(op)[0] == '=') {
         /* Simple: obj[key] = val */
-        EMIT_MBR_OBJ_KEY();
+        EMIT_CAPTURED_MBR_OBJ_KEY();
         sl_compile_expr(c, val);
         sl_emit(c, SL_OP_SET_PROPERTY, 0, 0);
     }
     else if (ZSTR_LEN(op) == 3 && ZSTR_VAL(op)[0] == '?' && ZSTR_VAL(op)[1] == '?' && ZSTR_VAL(op)[2] == '=') {
         /* obj[key] ??= val */
-        EMIT_MBR_OBJ_KEY();
-        EMIT_MBR_OBJ_KEY();
+        EMIT_CAPTURED_MBR_OBJ_KEY();
         sl_emit(c, SL_OP_GET_PROPERTY, 0, 0);
         sl_emit(c, SL_OP_DUP, 0, 0);
         uint32_t skip = sl_emit_jump(c, SL_OP_JUMP_IF_NOT_NULLISH);
         sl_emit(c, SL_OP_POP, 0, 0);
-        /* Re-emit obj+key for SetProperty */
-        EMIT_MBR_OBJ_KEY();
+        /* Reuse obj+key for SetProperty */
+        EMIT_CAPTURED_MBR_OBJ_KEY();
         sl_compile_expr(c, val);
         sl_emit(c, SL_OP_SET_PROPERTY, 0, 0);
         sl_patch_jump_here(c, skip);
     }
     else {
         /* Compound: obj[key] += val */
-        EMIT_MBR_OBJ_KEY();
-        EMIT_MBR_OBJ_KEY();
+        EMIT_CAPTURED_MBR_OBJ_KEY();
+        EMIT_CAPTURED_MBR_OBJ_KEY();
         sl_emit(c, SL_OP_GET_PROPERTY, 0, 0);
         sl_compile_expr(c, val);
         sl_emit(c, sl_compound_assign_op(op), 0, 0);
         sl_emit(c, SL_OP_SET_PROPERTY, 0, 0);
     }
 
-    #undef EMIT_MBR_OBJ_KEY
+    #undef EMIT_CAPTURED_MBR_OBJ_KEY
 }
 
 static void sl_compile_array_literal(sl_compiler *c, zval *expr) {

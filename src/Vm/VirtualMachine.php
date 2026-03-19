@@ -582,15 +582,33 @@ final class VirtualMachine
                 $sp = $this->sp;
                 break;
 
+            case OpCode::GetNamedProperty:
+                $this->sp = $sp;
+                $this->getNamedProperty($names[$opA[$ci]]);
+                $sp = $this->sp;
+                break;
+
             case OpCode::GetPropertyOpt:
                 $this->sp = $sp;
                 $this->getPropertyOpt();
                 $sp = $this->sp;
                 break;
 
+            case OpCode::GetNamedPropertyOpt:
+                $this->sp = $sp;
+                $this->getNamedPropertyOpt($names[$opA[$ci]]);
+                $sp = $this->sp;
+                break;
+
             case OpCode::SetProperty:
                 $this->sp = $sp;
                 $this->setProperty();
+                $sp = $this->sp;
+                break;
+
+            case OpCode::SetNamedProperty:
+                $this->sp = $sp;
+                $this->setNamedProperty($names[$opA[$ci]]);
                 $sp = $this->sp;
                 break;
 
@@ -740,8 +758,11 @@ final class VirtualMachine
             OpCode::MakeArray   => $this->makeArray($a),
             OpCode::MakeObject  => $this->makeObject($a),
             OpCode::GetProperty    => $this->getProperty(),
+            OpCode::GetNamedProperty => $this->getNamedProperty($this->frame->names[$a]),
             OpCode::GetPropertyOpt => $this->getPropertyOpt(),
+            OpCode::GetNamedPropertyOpt => $this->getNamedPropertyOpt($this->frame->names[$a]),
             OpCode::SetProperty    => $this->setProperty(),
+            OpCode::SetNamedProperty => $this->setNamedProperty($this->frame->names[$a]),
             OpCode::ArrayPush   => $this->arrayPush(),
             OpCode::ArraySpread => $this->arraySpread(),
 
@@ -1526,6 +1547,16 @@ final class VirtualMachine
         $this->resolveProperty($obj, $key);
     }
 
+    private function getNamedProperty(string $key): void
+    {
+        $obj = $this->pop();
+        if ($obj === null || $obj === JsUndefined::Value) {
+            $type = $obj === null ? 'null' : 'undefined';
+            throw new VmException("TypeError: Cannot read properties of {$type} (reading '{$key}')");
+        }
+        $this->resolveNamedProperty($obj, $key);
+    }
+
     private function getPropertyOpt(): void
     {
         $key = $this->pop();
@@ -1539,8 +1570,25 @@ final class VirtualMachine
         $this->resolveProperty($obj, $key);
     }
 
+    private function getNamedPropertyOpt(string $key): void
+    {
+        $obj = $this->pop();
+
+        if ($obj === null || $obj === JsUndefined::Value) {
+            $this->push(JsUndefined::Value);
+            return;
+        }
+
+        $this->resolveNamedProperty($obj, $key);
+    }
+
     private function resolveProperty(mixed $obj, mixed $key): void
     {
+        if (is_string($key)) {
+            $this->resolveNamedProperty($obj, $key);
+            return;
+        }
+
         if ($obj instanceof JsArray) {
             $this->push($obj->get($key, $this->callbackInvoker));
         } elseif ($obj instanceof JsObject) {
@@ -1562,6 +1610,33 @@ final class VirtualMachine
             }
         } elseif (is_int($obj) || is_float($obj)) {
             $this->push($this->getNumberMethod($obj, (string) $key));
+        } else {
+            $this->push(JsUndefined::Value);
+        }
+    }
+
+    private function resolveNamedProperty(mixed $obj, string $key): void
+    {
+        if ($obj instanceof JsArray) {
+            $this->push($obj->get($key, $this->callbackInvoker));
+        } elseif ($obj instanceof JsObject) {
+            $this->push($obj->get($key, $this->callbackInvoker));
+        } elseif ($obj instanceof JsDate) {
+            $this->push($obj->get($key));
+        } elseif ($obj instanceof JsRegex) {
+            $this->push($obj->get($key));
+        } elseif ($obj instanceof PhpObjectProxy) {
+            $this->push($obj->get($key));
+        } elseif ($obj instanceof NativeFunction) {
+            $this->push($obj->properties[$key] ?? JsUndefined::Value);
+        } elseif (is_string($obj)) {
+            if ($key === 'length') {
+                $this->push(mb_strlen($obj));
+            } else {
+                $this->push($this->getStringMethod($obj, $key, $this->callbackInvoker));
+            }
+        } elseif (is_int($obj) || is_float($obj)) {
+            $this->push($this->getNumberMethod($obj, $key));
         } else {
             $this->push(JsUndefined::Value);
         }
@@ -1830,6 +1905,22 @@ final class VirtualMachine
             $obj->set($key, $value);
         } elseif ($obj instanceof PhpObjectProxy) {
             $obj->set((string) $key, $value);
+        }
+
+        $this->push($value);
+    }
+
+    private function setNamedProperty(string $key): void
+    {
+        $value = $this->pop();
+        $obj = $this->pop();
+
+        if ($obj instanceof JsArray) {
+            $obj->set($key, $value);
+        } elseif ($obj instanceof JsObject) {
+            $obj->set($key, $value);
+        } elseif ($obj instanceof PhpObjectProxy) {
+            $obj->set($key, $value);
         }
 
         $this->push($value);
