@@ -516,7 +516,7 @@ final class Engine
         return $globalNames;
     }
 
-    private static function handleUndefinedVariableAsRuntimeException(int $errno, string $msg): bool
+    public static function handleUndefinedVariableAsRuntimeException(int $errno, string $msg): bool
     {
         if (!str_starts_with($msg, 'Undefined variable')) {
             return false;

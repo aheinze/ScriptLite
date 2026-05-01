@@ -1734,7 +1734,7 @@ final class VirtualMachine
                 return new JsArray($parts);
             }),
             'replace' => new NativeFunction('replace', function (mixed $search, mixed $replacement) use ($str, $invoker) {
-                $isCallback = $replacement instanceof JsClosure || $replacement instanceof NativeFunction || is_callable($replacement);
+                $isCallback = $replacement instanceof JsClosure || $replacement instanceof NativeFunction;
                 if ($search instanceof JsRegex) {
                     $pcre = $search->toPcre();
                     if ($isCallback && $invoker !== null) {
@@ -2460,7 +2460,7 @@ final class VirtualMachine
         if ($value instanceof PhpObjectProxy) {
             return $value->target;
         }
-        if (is_float($value) && $value == (int) $value && !is_infinite($value)) {
+        if (is_float($value) && is_finite($value) && $value == (int) $value) {
             return (int) $value;
         }
         return $value;

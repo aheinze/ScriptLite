@@ -125,7 +125,7 @@ final class PhpTranspiler
         if ($type === TypeHint::String) {
             return '(' . $this->emitExpr($e) . " !== '')";
         }
-        if ($type === TypeHint::Array_ || $type === TypeHint::Object_) {
+        if ($type === TypeHint::Array_ || $type === TypeHint::Object_ || $type === TypeHint::Function) {
             // Arrays and objects are always truthy in JS
             // Still evaluate the expression for side effects, then return true
             return '((' . $this->emitExpr($e) . ') || true)';
@@ -202,6 +202,7 @@ final class PhpTranspiler
     private function emitFuncDecl(FunctionDeclaration $d): string
     {
         $this->addVar($d->name);
+        $this->trackVar($d->name, TypeHint::Function);
         return '$' . $d->name . ' = ' . $this->emitClosure(
             $d->name,
             $d->params,
@@ -996,26 +997,33 @@ final class PhpTranspiler
             $rhsType = $this->inferType($e->value);
             // Fast path: both provably numeric
             if ($lhsType === TypeHint::Numeric && $rhsType === TypeHint::Numeric) {
+                $this->trackVar($phpName, TypeHint::Numeric);
                 return '($' . $phpName . ' += ' . $val . ')';
             }
             // Fast path: lhs is string
             if ($lhsType === TypeHint::String) {
+                $this->trackVar($phpName, TypeHint::String);
                 return '($' . $phpName . ' .= (string)(' . $val . '))';
             }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
+            $this->trackVar($phpName, TypeHint::Unknown);
             return '($' . $phpName . " = (is_string({$ta} = \${$phpName}) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
         }
         if ($e->operator === '??=') {
+            $this->trackVar($phpName, TypeHint::Unknown);
             return '($' . $phpName . ' = $' . $phpName . ' ?? ' . $val . ')';
         }
         if ($e->operator === '>>>=') {
+            $this->trackVar($phpName, TypeHint::Numeric);
             return '($' . $phpName . ' = ((int)$' . $phpName . ' & 0xFFFFFFFF) >> ((int)(' . $val . ') & 0x1F))';
         }
         if ($e->operator === '/=') {
+            $this->trackVar($phpName, TypeHint::Numeric);
             return '($' . $phpName . ' = ' . self::OPS . '::div($' . $phpName . ', ' . $val . '))';
         }
         if ($e->operator === '%=') {
+            $this->trackVar($phpName, TypeHint::Numeric);
             return '($' . $phpName . ' = ' . self::OPS . '::mod($' . $phpName . ', ' . $val . '))';
         }
         $op = match ($e->operator) {
@@ -1029,6 +1037,7 @@ final class PhpTranspiler
             '>>=' => '>>',
             default => throw new RuntimeException("Transpiler: unknown assign op {$e->operator}"),
         };
+        $this->trackVar($phpName, TypeHint::Numeric);
         return '($' . $phpName . ' = $' . $phpName . " {$op} {$val})";
     }
 
@@ -1047,6 +1056,7 @@ final class PhpTranspiler
             TypeHint::Bool => "({$tmp} = {$left})",
             TypeHint::String => "(({$tmp} = {$left}) !== '')",
             TypeHint::Numeric => "(({$tmp} = {$left}) !== 0 && {$tmp} !== 0.0 && (!is_float({$tmp}) || !is_nan({$tmp})))",
+            TypeHint::Array_, TypeHint::Object_, TypeHint::Function => "(({$tmp} = {$left}) || true)",
             default => self::OPS . "::toBoolean({$tmp} = {$left})",
         };
         if ($e->operator === '||') {
@@ -1072,6 +1082,7 @@ final class PhpTranspiler
         if ($hint === TypeHint::Numeric) return "'number'";
         if ($hint === TypeHint::String) return "'string'";
         if ($hint === TypeHint::Bool) return "'boolean'";
+        if ($hint === TypeHint::Function) return "'function'";
         if ($hint === TypeHint::Array_ || $hint === TypeHint::Object_) return "'object'";
 
         $v = '$__typeof' . ($this->tmpId++);
@@ -1418,8 +1429,7 @@ final class PhpTranspiler
         if ($useOpt) {
             $tmp = '$__oc' . ($this->tmpId++);
             $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
-            $argStr = implode(', ', $args);
-            return "(({$tmp} = {$callee}) === null ? null : {$tmp}({$argStr}))";
+            return "(({$tmp} = {$callee}) === null ? null : " . $this->emitRuntimeCall($tmp, $args) . ')';
         }
 
         $hasSpread = false;
@@ -1429,12 +1439,12 @@ final class PhpTranspiler
 
         if (!$hasSpread) {
             $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
-            return $callee . '(' . implode(', ', $args) . ')';
+            return $this->emitRuntimeCall($callee, $args, $this->canCallDirect($e->callee));
         }
 
         // Spread call: build merged array and splat
         $merged = $this->emitSpreadArgs($e->arguments);
-        return $callee . '(...' . $merged . ')';
+        return self::OPS . '::call(' . $callee . ', ' . $merged . ')';
     }
 
     /** @param array<Expr|SpreadElement> $args */
@@ -1444,6 +1454,28 @@ final class PhpTranspiler
         foreach ($args as $a) {
             if ($a instanceof SpreadElement) { return true; }
         }
+        return false;
+    }
+
+    /** @param list<string> $args */
+    private function emitRuntimeCall(string $callee, array $args, bool $direct = false): string
+    {
+        if ($direct) {
+            return $callee . '(' . implode(', ', $args) . ')';
+        }
+        return self::OPS . '::assertFunction(' . $callee . ')(' . implode(', ', $args) . ')';
+    }
+
+    private function canCallDirect(Expr $callee): bool
+    {
+        if ($callee instanceof FunctionExpr) {
+            return true;
+        }
+
+        if ($callee instanceof Identifier) {
+            return $this->inferFromName($this->resolveVar($callee->name)) === TypeHint::Function;
+        }
+
         return false;
     }
 
@@ -1488,7 +1520,7 @@ final class PhpTranspiler
             $dynamicMethod = $objectType === TypeHint::Object_
                 ? "({$tmp}->properties['{$method}'] ?? null)"
                 : "{$tmp}['{$method}']";
-            return "(({$tmp} = {$obj}) === null ? null : {$dynamicMethod}(" . implode(', ', $a) . '))';
+            return "(({$tmp} = {$obj}) === null ? null : " . $this->emitRuntimeCall($dynamicMethod, $a) . ')';
         }
 
         $dynamicMethod = $objectType === TypeHint::Object_
@@ -1524,7 +1556,7 @@ final class PhpTranspiler
                 'sign' => '((' . $a[0] . ') <=> 0)',
                 'trunc' => '(int)(' . $a[0] . ')',
                 'clz32' => '(' . $a[0] . ' === 0 ? 32 : (31 - (int)floor(log((' . $a[0] . ') & 0xFFFFFFFF, 2))))',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1540,7 +1572,7 @@ final class PhpTranspiler
             return match ($method) {
                 'now' => '(int)(microtime(true) * 1000)',
                 'parse' => '(int)(strtotime(' . $a[0] . ') * 1000)',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1551,7 +1583,7 @@ final class PhpTranspiler
                 'isArray' => 'is_array(' . $a[0] . ')',
                 'from' => 'array_values((array)(' . $a[0] . '))',
                 'of' => '[' . implode(', ', $a) . ']',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1566,7 +1598,7 @@ final class PhpTranspiler
                 'is' => self::OPS . '::objectIs(' . $a[0] . ', ' . $a[1] . ')',
                 'create' => self::OPS . '::objectCreate(' . $a[0] . ')',
                 'freeze' => $a[0],  // freeze is a no-op in transpiled path (no enforcement)
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1580,7 +1612,7 @@ final class PhpTranspiler
                 'isNaN' => "(is_float({$t} = {$a[0]}) && is_nan({$t}))",
                 'parseInt' => self::OPS . '::parseInt(' . implode(', ', $a) . ')',
                 'parseFloat' => '(is_numeric($__pf = (string)(' . $a[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1590,7 +1622,7 @@ final class PhpTranspiler
             return match ($method) {
                 'stringify' => self::OPS . '::jsonStringify(' . $a[0] . ')',
                 'parse' => self::OPS . '::jsonParse(' . $a[0] . ')',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1599,7 +1631,7 @@ final class PhpTranspiler
             $a = $emitArgs();
             return match ($method) {
                 'fromCharCode' => 'implode("", array_map(fn($c) => mb_chr((int)$c, "UTF-8"), [' . implode(', ', $a) . ']))',
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
 
@@ -1624,7 +1656,7 @@ final class PhpTranspiler
             return match ($method) {
                 'test' => '(bool)preg_match(' . $pcre . ', ' . $a[0] . ')',
                 'exec' => "{$execHelper}({$pcre}, {$a[0]})",
-                default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+                default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
         // Regex stored in variable: detect ['__re' => true] pattern
@@ -1632,9 +1664,9 @@ final class PhpTranspiler
             $a = $emitArgs();
             $t = '$__t' . $this->tmpId++;
             if ($method === 'test') {
-                return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? (bool)preg_match({$t}['pcre'], {$a[0]}) : {$t}['{$method}']({$a[0]}))";
+                return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? (bool)preg_match({$t}['pcre'], {$a[0]}) : " . $this->emitRuntimeCall("{$t}['{$method}']", $a) . ')';
             }
-            return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? {$execHelper}({$t}['pcre'], {$a[0]}) : {$t}['{$method}']({$a[0]}))";
+            return "(is_array({$t} = {$obj}) && ({$t}['__re'] ?? false) ? {$execHelper}({$t}['pcre'], {$a[0]}) : " . $this->emitRuntimeCall("{$t}['{$method}']", $a) . ')';
         }
 
         $a = $emitArgs();
@@ -1646,26 +1678,26 @@ final class PhpTranspiler
             'pop' => 'array_pop(' . $obj . ')',
             'shift' => 'array_shift(' . $obj . ')',
             'unshift' => 'array_unshift(' . $obj . ', ' . $a[0] . ')',
-            'filter' => $this->callbackUsesIndex($args) ? 'array_values(array_filter(' . $obj . ', ' . $a[0] . ', ARRAY_FILTER_USE_BOTH))' : 'array_values(array_filter(' . $obj . ', ' . $a[0] . '))',
-            'map' => $this->callbackUsesIndex($args) ? 'array_map(' . $a[0] . ', ' . $obj . ', array_keys(' . $obj . '))' : 'array_map(' . $a[0] . ', ' . $obj . ')',
+            'filter' => $this->emitArrayFilter($obj, $a[0], $this->callbackUsesIndex($args), $use),
+            'map' => $this->emitArrayMap($obj, $a[0], $this->callbackUsesIndex($args), $use),
             'reduce' => isset($a[1])
-                ? 'array_reduce(' . $obj . ', ' . $a[0] . ', ' . $a[1] . ')'
-                : "(function(){$use} { \$__r = array_values({$obj}); return array_reduce(array_slice(\$__r, 1), {$a[0]}, \$__r[0]); })()",
+                ? $this->emitArrayReduce($obj, $a[0], $a[1], false, $use)
+                : $this->emitArrayReduce($obj, $a[0], null, false, $use),
             'reduceRight' => isset($a[1])
-                ? 'array_reduce(array_reverse(' . $obj . '), ' . $a[0] . ', ' . $a[1] . ')'
-                : "(function(){$use} { \$__r = array_reverse({$obj}); return array_reduce(array_slice(\$__r, 1), {$a[0]}, \$__r[0]); })()",
-            'forEach' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { ({$a[0]})(\$__v, \$__i); } })()",
-            'every' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (!({$a[0]})(\$__v, \$__i)) return false; } return true; })()",
-            'some' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return true; } return false; })()",
-            'find' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__v; } return null; })()",
-            'findIndex' => "(function(){$use} { foreach ({$obj} as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__i; } return -1; })()",
+                ? $this->emitArrayReduce($obj, $a[0], $a[1], true, $use)
+                : $this->emitArrayReduce($obj, $a[0], null, true, $use),
+            'forEach' => $this->emitArrayPredicateLoop($obj, $a[0], 'forEach', $use),
+            'every' => $this->emitArrayPredicateLoop($obj, $a[0], 'every', $use),
+            'some' => $this->emitArrayPredicateLoop($obj, $a[0], 'some', $use),
+            'find' => $this->emitArrayPredicateLoop($obj, $a[0], 'find', $use),
+            'findIndex' => $this->emitArrayPredicateLoop($obj, $a[0], 'findIndex', $use),
             'join' => 'implode(' . ($a[0] ?? "','") . ', ' . $obj . ')',
             'concat' => $this->emitConcat($obj, $a, $objectType),
             'indexOf' => $this->emitIndexOf($obj, $a),
             'includes' => $this->emitIncludes($obj, $a),
             'slice' => $this->emitSlice($obj, $a),
             'sort' => isset($a[0])
-                ? "(function(){$use} { usort({$obj}, {$a[0]}); return {$obj}; })()"
+                ? $this->emitArraySort($obj, $a[0], $use)
                 : "(function(){$use} { usort({$obj}, function(\$a, \$b) { return strcmp((string)\$a, (string)\$b); }); return {$obj}; })()",
             'reverse' => 'array_reverse(' . $obj . ')',
             'flat' => $this->emitFlat($obj, $a),
@@ -1673,9 +1705,9 @@ final class PhpTranspiler
                 ? 'array_splice(' . $obj . ', ' . $a[0] . ', ' . $a[1] . ', [' . implode(', ', array_slice($a, 2)) . '])'
                 : 'array_splice(' . $obj . ', ' . implode(', ', $a) . ')',
             'fill' => "(function(){$use} { for (\$__i = " . ($a[1] ?? '0') . "; \$__i < " . ($a[2] ?? 'count(' . $obj . ')') . "; \$__i++) { {$obj}[\$__i] = {$a[0]}; } return {$obj}; })()",
-            'findLast' => "(function(){$use} { foreach (array_reverse({$obj}, true) as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__v; } return null; })()",
-            'findLastIndex' => "(function(){$use} { foreach (array_reverse({$obj}, true) as \$__i => \$__v) { if (({$a[0]})(\$__v, \$__i)) return \$__i; } return -1; })()",
-            'flatMap' => "array_merge(...array_map(fn(\$__v, \$__i) => (array)(({$a[0]})(\$__v, \$__i)), {$obj}, array_keys({$obj})))",
+            'findLast' => $this->emitArrayPredicateLoop($obj, $a[0], 'findLast', $use),
+            'findLastIndex' => $this->emitArrayPredicateLoop($obj, $a[0], 'findLastIndex', $use),
+            'flatMap' => $this->emitArrayFlatMap($obj, $a[0], $use),
 
             // ── String methods ──
             'split' => $this->emitStrSplit($obj, $a, $args),
@@ -1706,8 +1738,82 @@ final class PhpTranspiler
                 : self::OPS . '::hasOwn(' . $obj . ', ' . $a[0] . ')',
 
             // ── Unknown method → property access returning function ──
-            default => $dynamicMethod . '(' . implode(', ', $a) . ')',
+            default => $this->emitRuntimeCall($dynamicMethod, $a),
         };
+    }
+
+    // ───────────────── Array callback helpers ─────────────────
+
+    private function emitArrayFilter(string $obj, string $callback, bool $withIndex, string $use): string
+    {
+        $args = $withIndex ? '$__v, $__i' : '$__v';
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); \$__out = []; "
+            . "foreach ({$obj} as \$__i => \$__v) { "
+            . "if (" . self::OPS . "::toBoolean(\$__cb({$args}))) \$__out[] = \$__v; "
+            . "} return \$__out; })()";
+    }
+
+    private function emitArrayMap(string $obj, string $callback, bool $withIndex, string $use): string
+    {
+        $args = $withIndex ? '$__v, $__i' : '$__v';
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); \$__out = []; "
+            . "foreach ({$obj} as \$__i => \$__v) { \$__out[] = \$__cb({$args}); } "
+            . "return \$__out; })()";
+    }
+
+    private function emitArrayReduce(string $obj, string $callback, ?string $initial, bool $right, string $use): string
+    {
+        $values = $right ? 'array_reverse(array_values($__src))' : 'array_values($__src)';
+        $init = $initial !== null
+            ? "\$__acc = {$initial};"
+            : "if (\$__arr === []) throw new \\RuntimeException('TypeError: Reduce of empty array with no initial value'); "
+                . "\$__acc = array_shift(\$__arr);";
+
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); \$__src = {$obj}; \$__arr = {$values}; {$init} "
+            . "foreach (\$__arr as \$__i => \$__v) { \$__acc = \$__cb(\$__acc, \$__v, \$__i, \$__src); } "
+            . "return \$__acc; })()";
+    }
+
+    private function emitArrayPredicateLoop(string $obj, string $callback, string $mode, string $use): string
+    {
+        $iterable = ($mode === 'findLast' || $mode === 'findLastIndex')
+            ? "array_reverse({$obj}, true)"
+            : $obj;
+
+        $body = match ($mode) {
+            'forEach' => "\$__cb(\$__v, \$__i);",
+            'every' => "if (!" . self::OPS . "::toBoolean(\$__cb(\$__v, \$__i))) return false;",
+            'some' => "if (" . self::OPS . "::toBoolean(\$__cb(\$__v, \$__i))) return true;",
+            'find', 'findLast' => "if (" . self::OPS . "::toBoolean(\$__cb(\$__v, \$__i))) return \$__v;",
+            'findIndex', 'findLastIndex' => "if (" . self::OPS . "::toBoolean(\$__cb(\$__v, \$__i))) return \$__i;",
+            default => throw new RuntimeException('Unknown array predicate mode: ' . $mode),
+        };
+
+        $fallback = match ($mode) {
+            'forEach' => 'null',
+            'every' => 'true',
+            'some' => 'false',
+            'find', 'findLast' => 'null',
+            'findIndex', 'findLastIndex' => '-1',
+            default => 'null',
+        };
+
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); foreach ({$iterable} as \$__i => \$__v) { {$body} } return {$fallback}; })()";
+    }
+
+    private function emitArraySort(string $obj, string $callback, string $use): string
+    {
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); "
+            . "usort({$obj}, fn(\$__a, \$__b) => (int)\$__cb(\$__a, \$__b)); "
+            . "return {$obj}; })()";
+    }
+
+    private function emitArrayFlatMap(string $obj, string $callback, string $use): string
+    {
+        return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); \$__out = []; "
+            . "foreach ({$obj} as \$__i => \$__v) { \$__mapped = \$__cb(\$__v, \$__i); "
+            . "\$__out = array_merge(\$__out, (array)\$__mapped); } "
+            . "return \$__out; })()";
     }
 
     // ───────────────── String method helpers ─────────────────
@@ -1765,11 +1871,11 @@ final class PhpTranspiler
             $pcre = $this->jsToPcre($argExprs[0]->pattern, $argExprs[0]->flags);
             $limit = str_contains($argExprs[0]->flags, 'g') ? '-1' : '1';
             if ($isCallback) {
-                return "preg_replace_callback({$pcre}, function(\$__m) { return (string)({$a[1]})(...\$__m); }, {$obj}, {$limit})";
+                return "preg_replace_callback({$pcre}, function(\$__m) { \$__cb = " . self::OPS . "::assertFunction({$a[1]}); return (string)\$__cb(...\$__m); }, {$obj}, {$limit})";
             }
             if ($maybeCallback) {
                 $use = $this->makeUseClause();
-                return "(function(){$use} { \$__cb = {$a[1]}; return is_callable(\$__cb) "
+                return "(function(){$use} { \$__cb = {$a[1]}; return " . self::OPS . "::isFunction(\$__cb) "
                     . "? preg_replace_callback({$pcre}, function(\$__m) use (&\$__cb) { return (string)\$__cb(...\$__m); }, {$obj}, {$limit}) "
                     . ": preg_replace({$pcre}, \$__cb, {$obj}, {$limit}); })()";
             }
@@ -1778,12 +1884,13 @@ final class PhpTranspiler
         $use = $this->makeUseClause();
         if ($isCallback) {
             return "(function(){$use} { \$__p = strpos({$obj}, {$a[0]}); "
-                . "return \$__p === false ? {$obj} : substr({$obj}, 0, \$__p) . (string)({$a[1]})({$a[0]}, \$__p, {$obj}) . substr({$obj}, \$__p + strlen({$a[0]})); })()";
+                . "\$__cb = " . self::OPS . "::assertFunction({$a[1]}); "
+                . "return \$__p === false ? {$obj} : substr({$obj}, 0, \$__p) . (string)\$__cb({$a[0]}, \$__p, {$obj}) . substr({$obj}, \$__p + strlen({$a[0]})); })()";
         }
         if ($maybeCallback) {
             return "(function(){$use} { \$__cb = {$a[1]}; \$__p = strpos({$obj}, {$a[0]}); "
                 . "if (\$__p === false) return {$obj}; "
-                . "return is_callable(\$__cb) "
+                . "return " . self::OPS . "::isFunction(\$__cb) "
                 . "? substr({$obj}, 0, \$__p) . (string)\$__cb({$a[0]}, \$__p, {$obj}) . substr({$obj}, \$__p + strlen({$a[0]})) "
                 . ": substr({$obj}, 0, \$__p) . \$__cb . substr({$obj}, \$__p + strlen({$a[0]})); })()";
         }
@@ -2660,13 +2767,6 @@ final class PhpTranspiler
                 $result[$name] = $type;
             }
         }
-        // Also keep types introduced in branch if not conflicting
-        foreach ($branch as $name => $type) {
-            if (!isset($before[$name]) && !isset($result[$name])) {
-                // New variable introduced in branch — keep it
-                $result[$name] = $type;
-            }
-        }
         return $result;
     }
 
@@ -2693,6 +2793,7 @@ final class PhpTranspiler
             $e instanceof BooleanLiteral => TypeHint::Bool,
             $e instanceof ArrayLiteral => TypeHint::Array_,
             $e instanceof ObjectLiteral => TypeHint::Object_,
+            $e instanceof FunctionExpr => TypeHint::Function,
 
             // Arithmetic always produces numeric
             $e instanceof BinaryExpr && in_array($e->operator, ['-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>'], true)

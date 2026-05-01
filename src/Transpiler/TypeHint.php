@@ -17,5 +17,6 @@ enum TypeHint
     case Bool;      // boolean
     case Array_;    // array (known)
     case Object_;   // plain JS object literal (boxed JSObject, no prototype walk needed)
+    case Function;  // ScriptLite-created closure/function object
     case Unknown;   // need the runtime guard
 }

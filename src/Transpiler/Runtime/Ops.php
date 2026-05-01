@@ -28,6 +28,37 @@ final class Ops
     }
 
     /**
+     * Values that ScriptLite is allowed to invoke from transpiled code.
+     *
+     * PHP considers strings like "system" and arrays like [ClassName, "method"]
+     * callable. Those are PHP internals, not ScriptLite functions, so never use
+     * is_callable() for sandboxed JS calls.
+     */
+    public static function isFunction(mixed $value): bool
+    {
+        return $value instanceof JSFunction || $value instanceof \Closure;
+    }
+
+    public static function assertFunction(mixed $value): mixed
+    {
+        if (!self::isFunction($value)) {
+            throw new \RuntimeException('TypeError: value is not a function');
+        }
+
+        return $value;
+    }
+
+    /**
+     * JS function call with an explicit callable allow-list.
+     *
+     * @param list<mixed> $args
+     */
+    public static function call(mixed $callee, array $args): mixed
+    {
+        return self::assertFunction($callee)(...$args);
+    }
+
+    /**
      * JS ToNumber: coerce any value to int|float.
      */
     public static function toNumber(mixed $v): int|float
@@ -576,7 +607,7 @@ final class Ops
             return $fallback;
         }
 
-        if (is_callable($callee)) {
+        if ($callee instanceof \Closure) {
             $result = $callee(...$args);
             if (self::isObjectLike($result)) {
                 return $result;
