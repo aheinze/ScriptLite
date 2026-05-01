@@ -2,7 +2,11 @@
 #define SL_VM_H
 
 #include "sl_environment.h"
+#if __has_include("ext/standard/php_smart_string.h")
 #include "ext/standard/php_smart_string.h"
+#else
+#include "zend_smart_string.h"
+#endif
 
 #define SL_INLINE_FRAME_REGS 8
 

@@ -10,7 +10,11 @@
 #include "ext/standard/info.h"
 #include "zend_exceptions.h"
 #include "zend_interfaces.h"
+#if __has_include("ext/standard/php_smart_string.h")
 #include "ext/standard/php_smart_string.h"
+#else
+#include "zend_smart_string.h"
+#endif
 
 #define PHP_SCRIPTLITE_VERSION "0.1.0"
 #define PHP_SCRIPTLITE_EXTNAME "scriptlite"
