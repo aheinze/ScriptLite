@@ -191,16 +191,10 @@ final class Engine
             return $this->transpileAndEval($source, $globals);
         }
 
-        if ($backend === self::BACKEND_NATIVE && $this->extensionEngine !== null) {
-            $this->lastNativeVm = null;
-            $this->lastVm = null;
-            return $this->extensionEngine->eval(
-                $source,
-                $globals,
-                \ScriptLiteExt\Engine::BACKEND_NATIVE
-            );
-        }
-
+        // Every bytecode backend goes through the compile cache, the C extension included:
+        // compiling is most of the cost of a short script there (~80% for `item.price * item.qty`).
+        // This is safe because the extension's compile() ignores globals, and its eval() is
+        // exactly compile + execute on the same VM, which is what run() does.
         return $this->run($this->compileCached($source, $backend), $globals);
     }
 

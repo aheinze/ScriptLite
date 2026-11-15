@@ -127,4 +127,63 @@ final class EngineBackendUnificationTest extends ScriptLiteTestCase
         self::assertSame(2, $engine->eval('1 + 1'));
         self::assertSame(4, $engine->eval('2 + 2'));
     }
+
+    private static function compiledCacheSize(Engine $engine): int
+    {
+        return count((new \ReflectionProperty(Engine::class, 'compiledCache'))->getValue($engine));
+    }
+
+    public function testEvalCompilesEachSourceOnceAndStaysCorrectAcrossGlobals(): void
+    {
+        // $this->engine is the C extension when it is loaded, otherwise the PHP VM:
+        // both bytecode backends share Engine's compile cache.
+        $engine = $this->engine;
+        $source = 'item.price * item.qty + bonus';
+
+        self::assertSame(42, $engine->eval($source, ['item' => ['price' => 10, 'qty' => 4], 'bonus' => 2]));
+        self::assertSame(7, $engine->eval($source, ['item' => ['price' => 1, 'qty' => 5], 'bonus' => 2]));
+        self::assertSame(1, self::compiledCacheSize($engine));
+
+        // A cached script must not keep state from the previous run: a global that exists in one
+        // run and not in the next, and a function reading a different global value each time.
+        $probe = 'typeof x === "undefined" ? "none" : x';
+        self::assertSame('none', $engine->eval($probe));
+        self::assertSame('set', $engine->eval($probe, ['x' => 'set']));
+        self::assertSame('none', $engine->eval($probe));
+
+        $fn = 'function f() { return v * 2; } f()';
+        self::assertSame(2, $engine->eval($fn, ['v' => 1]));
+        self::assertSame(20, $engine->eval($fn, ['v' => 10]));
+
+        self::assertSame(3, self::compiledCacheSize($engine));
+    }
+
+    public function testEvalNeverCachesACompileFailure(): void
+    {
+        $engine = $this->engine;
+        $before = self::compiledCacheSize($engine);
+
+        for ($i = 0; $i < 2; $i++) {
+            try {
+                $engine->eval('var x = ;');
+                self::fail('Expected a syntax error');
+            } catch (\Throwable $e) {
+                self::assertNotSame('Expected a syntax error', $e->getMessage());
+            }
+        }
+
+        self::assertSame($before, self::compiledCacheSize($engine));
+    }
+
+    public function testCachedEvalStillCapturesConsoleOutputOfEachRun(): void
+    {
+        $engine = $this->engine;
+        $source = 'console.log("run " + n); n';
+
+        self::assertSame(1, $engine->eval($source, ['n' => 1]));
+        self::assertStringContainsString('run 1', $engine->getOutput());
+
+        self::assertSame(2, $engine->eval($source, ['n' => 2]));
+        self::assertStringContainsString('run 2', $engine->getOutput());
+    }
 }
