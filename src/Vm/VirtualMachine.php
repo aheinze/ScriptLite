@@ -16,6 +16,7 @@ use ScriptLite\Runtime\JsRegex;
 use ScriptLite\Runtime\PhpObjectProxy;
 use ScriptLite\Runtime\JsUndefined;
 use ScriptLite\Runtime\NativeFunction;
+use ScriptLite\Transpiler\Runtime\Ops;
 
 /**
  * Stack-based Virtual Machine for executing compiled JavaScript bytecode.
@@ -219,31 +220,30 @@ final class VirtualMachine
             // ── Bitwise ──
             case OpCode::BitAnd:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = ((int) $stack[$sp - 1]) & ((int) $b);
+                $stack[$sp - 1] = Ops::toInt32($stack[$sp - 1]) & Ops::toInt32($b);
                 break;
             case OpCode::BitOr:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = ((int) $stack[$sp - 1]) | ((int) $b);
+                $stack[$sp - 1] = Ops::toInt32($stack[$sp - 1]) | Ops::toInt32($b);
                 break;
             case OpCode::BitXor:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = ((int) $stack[$sp - 1]) ^ ((int) $b);
+                $stack[$sp - 1] = Ops::toInt32($stack[$sp - 1]) ^ Ops::toInt32($b);
                 break;
             case OpCode::BitNot:
-                $stack[$sp - 1] = ~((int) $stack[$sp - 1]);
+                $stack[$sp - 1] = ~Ops::toInt32($stack[$sp - 1]);
                 break;
             case OpCode::Shl:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = ((int) $stack[$sp - 1]) << (((int) $b) & 0x1F);
+                $stack[$sp - 1] = Ops::toInt32(Ops::toInt32($stack[$sp - 1]) << (Ops::toUint32($b) & 0x1F));
                 break;
             case OpCode::Shr:
                 $b = $stack[--$sp];
-                $stack[$sp - 1] = ((int) $stack[$sp - 1]) >> (((int) $b) & 0x1F);
+                $stack[$sp - 1] = Ops::toInt32($stack[$sp - 1]) >> (Ops::toUint32($b) & 0x1F);
                 break;
             case OpCode::Ushr:
                 $b = $stack[--$sp];
-                $shift = ((int) $b) & 0x1F;
-                $stack[$sp - 1] = (((int) $stack[$sp - 1]) & 0xFFFFFFFF) >> $shift;
+                $stack[$sp - 1] = Ops::toUint32($stack[$sp - 1]) >> (Ops::toUint32($b) & 0x1F);
                 break;
 
             // ── Comparison (inlined — no closure allocation) ──
@@ -300,11 +300,11 @@ final class VirtualMachine
             // ── Property tests / delete ──
             case OpCode::HasProp:
                 $obj = $stack[--$sp]; // right operand (object)
-                $key = (string) $stack[$sp - 1]; // left operand (key)
+                $key = self::propertyKey($stack[$sp - 1]); // left operand (key)
                 if ($obj instanceof JsObject) {
                     $stack[$sp - 1] = array_key_exists($key, $obj->properties);
                 } elseif ($obj instanceof JsArray) {
-                    $idx = is_numeric($key) ? (int) $key : -1;
+                    $idx = JsArray::toIndex($key) ?? -1;
                     $stack[$sp - 1] = $idx >= 0 && $idx < count($obj->elements);
                 } else {
                     $stack[$sp - 1] = false;
@@ -319,9 +319,8 @@ final class VirtualMachine
                 $key = $stack[--$sp];
                 $obj = $stack[--$sp];
                 if ($obj instanceof JsObject) {
-                    unset($obj->properties[(string) $key]);
-                } elseif ($obj instanceof JsArray && is_numeric($key)) {
-                    $idx = (int) $key;
+                    unset($obj->properties[self::propertyKey($key)]);
+                } elseif ($obj instanceof JsArray && ($idx = JsArray::toIndex($key)) !== null) {
                     if ($idx >= 0 && $idx < count($obj->elements)) {
                         $obj->elements[$idx] = JsUndefined::Value;
                     }
@@ -568,7 +567,7 @@ final class VirtualMachine
                 $values = [];
                 for ($j = $count - 1; $j >= 0; $j--) {
                     $values[$j] = $stack[--$sp];
-                    $keys[$j] = (string) $stack[--$sp];
+                    $keys[$j] = self::propertyKey($stack[--$sp]);
                 }
                 for ($j = 0; $j < $count; $j++) {
                     $properties[$keys[$j]] = $values[$j];
@@ -702,7 +701,7 @@ final class VirtualMachine
             OpCode::BitAnd => $this->binaryBitAnd(),
             OpCode::BitOr  => $this->binaryBitOr(),
             OpCode::BitXor => $this->binaryBitXor(),
-            OpCode::BitNot => $this->push(~((int) $this->pop())),
+            OpCode::BitNot => $this->push(~Ops::toInt32($this->pop())),
             OpCode::Shl    => $this->binaryShl(),
             OpCode::Shr    => $this->binaryShr(),
             OpCode::Ushr   => $this->binaryUshr(),
@@ -919,42 +918,42 @@ final class VirtualMachine
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push(((int) $a) & ((int) $b));
+        $this->push(Ops::toInt32($a) & Ops::toInt32($b));
     }
 
     private function binaryBitOr(): void
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push(((int) $a) | ((int) $b));
+        $this->push(Ops::toInt32($a) | Ops::toInt32($b));
     }
 
     private function binaryBitXor(): void
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push(((int) $a) ^ ((int) $b));
+        $this->push(Ops::toInt32($a) ^ Ops::toInt32($b));
     }
 
     private function binaryShl(): void
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push(((int) $a) << (((int) $b) & 0x1F));
+        $this->push(Ops::toInt32(Ops::toInt32($a) << (Ops::toUint32($b) & 0x1F)));
     }
 
     private function binaryShr(): void
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push(((int) $a) >> (((int) $b) & 0x1F));
+        $this->push(Ops::toInt32($a) >> (Ops::toUint32($b) & 0x1F));
     }
 
     private function binaryUshr(): void
     {
         $b = $this->pop();
         $a = $this->pop();
-        $this->push((((int) $a) & 0xFFFFFFFF) >> (((int) $b) & 0x1F));
+        $this->push(Ops::toUint32($a) >> (Ops::toUint32($b) & 0x1F));
     }
 
     private function binaryEq(): void
@@ -1431,11 +1430,11 @@ final class VirtualMachine
     private function hasProp(): void
     {
         $obj = $this->pop(); // right operand
-        $key = (string) $this->pop(); // left operand
+        $key = self::propertyKey($this->pop()); // left operand
         if ($obj instanceof JsObject) {
             $this->push(array_key_exists($key, $obj->properties));
         } elseif ($obj instanceof JsArray) {
-            $idx = is_numeric($key) ? (int) $key : -1;
+            $idx = JsArray::toIndex($key) ?? -1;
             $this->push($idx >= 0 && $idx < count($obj->elements));
         } else {
             $this->push(false);
@@ -1454,9 +1453,8 @@ final class VirtualMachine
         $key = $this->pop();
         $obj = $this->pop();
         if ($obj instanceof JsObject) {
-            unset($obj->properties[(string) $key]);
-        } elseif ($obj instanceof JsArray && is_numeric($key)) {
-            $idx = (int) $key;
+            unset($obj->properties[self::propertyKey($key)]);
+        } elseif ($obj instanceof JsArray && ($idx = JsArray::toIndex($key)) !== null) {
             if ($idx >= 0 && $idx < count($obj->elements)) {
                 $obj->elements[$idx] = JsUndefined::Value;
             }
@@ -1527,7 +1525,7 @@ final class VirtualMachine
         $values = [];
         for ($i = $count - 1; $i >= 0; $i--) {
             $values[$i] = $this->pop();
-            $keys[$i] = (string) $this->pop();
+            $keys[$i] = self::propertyKey($this->pop());
         }
         $properties = [];
         for ($i = 0; $i < $count; $i++) {
@@ -1596,20 +1594,20 @@ final class VirtualMachine
         } elseif ($obj instanceof JsDate) {
             $this->push($obj->get($key));
         } elseif ($obj instanceof JsRegex) {
-            $this->push($obj->get((string) $key));
+            $this->push($obj->get(self::propertyKey($key)));
         } elseif ($obj instanceof PhpObjectProxy) {
-            $this->push($obj->get((string) $key));
+            $this->push($obj->get(self::propertyKey($key)));
         } elseif ($obj instanceof NativeFunction) {
             // Function-as-object: e.g. Date.now, Date.parse
-            $this->push($obj->properties[(string) $key] ?? JsUndefined::Value);
+            $this->push($obj->properties[self::propertyKey($key)] ?? JsUndefined::Value);
         } elseif (is_string($obj)) {
             if ($key === 'length') {
                 $this->push(mb_strlen($obj));
             } else {
-                $this->push($this->getStringMethod($obj, (string) $key, $this->callbackInvoker));
+                $this->push($this->getStringMethod($obj, self::propertyKey($key), $this->callbackInvoker));
             }
         } elseif (is_int($obj) || is_float($obj)) {
-            $this->push($this->getNumberMethod($obj, (string) $key));
+            $this->push($this->getNumberMethod($obj, self::propertyKey($key)));
         } else {
             $this->push(JsUndefined::Value);
         }
@@ -1646,48 +1644,50 @@ final class VirtualMachine
     {
         return match ($name) {
             'charAt' => new NativeFunction('charAt', function (mixed $index = 0) use ($str) {
-                $i = (int) $index;
+                $i = Ops::toInteger($index);
                 return ($i >= 0 && $i < mb_strlen($str)) ? mb_substr($str, $i, 1) : '';
             }),
             'charCodeAt' => new NativeFunction('charCodeAt', function (mixed $index = 0) use ($str) {
-                $i = (int) $index;
+                $i = Ops::toInteger($index);
                 if ($i < 0 || $i >= mb_strlen($str)) {
                     return NAN;
                 }
                 return (float) mb_ord(mb_substr($str, $i, 1));
             }),
             'indexOf' => new NativeFunction('indexOf', function (mixed $search, mixed $fromIndex = 0) use ($str) {
-                $pos = mb_strpos($str, (string) $search, max(0, (int) $fromIndex));
+                $from = min(max(0, Ops::toInteger($fromIndex)), mb_strlen($str));
+                $pos = mb_strpos($str, self::toJsString($search), $from);
                 return $pos === false ? -1 : $pos;
             }),
             'lastIndexOf' => new NativeFunction('lastIndexOf', function (mixed $search) use ($str) {
-                $pos = mb_strrpos($str, (string) $search);
+                $pos = mb_strrpos($str, self::toJsString($search));
                 return $pos === false ? -1 : $pos;
             }),
             'includes' => new NativeFunction('includes', function (mixed $search, mixed $fromIndex = 0) use ($str) {
-                return mb_strpos($str, (string) $search, max(0, (int) $fromIndex)) !== false;
+                $from = min(max(0, Ops::toInteger($fromIndex)), mb_strlen($str));
+                return mb_strpos($str, self::toJsString($search), $from) !== false;
             }),
             'startsWith' => new NativeFunction('startsWith', function (mixed $prefix, mixed $pos = 0) use ($str) {
-                $p = (int) $pos;
-                return str_starts_with(mb_substr($str, $p), (string) $prefix);
+                $p = Ops::toInteger($pos);
+                return str_starts_with(mb_substr($str, $p), self::toJsString($prefix));
             }),
             'endsWith' => new NativeFunction('endsWith', function (mixed $suffix, mixed $endPos = null) use ($str) {
-                $s = (string) $suffix;
+                $s = self::toJsString($suffix);
                 $sub = $endPos !== null && $endPos !== JsUndefined::Value
-                    ? mb_substr($str, 0, (int) $endPos)
+                    ? mb_substr($str, 0, max(0, Ops::toInteger($endPos)))
                     : $str;
                 return str_ends_with($sub, $s);
             }),
             'slice' => new NativeFunction('slice', function (mixed $start = 0, mixed $end = null) use ($str) {
                 $len = mb_strlen($str);
-                $s = (int) $start;
+                $s = Ops::toInteger($start);
                 if ($s < 0) {
                     $s = max($len + $s, 0);
                 }
                 if ($end === null || $end === JsUndefined::Value) {
                     return mb_substr($str, $s);
                 }
-                $e = (int) $end;
+                $e = Ops::toInteger($end);
                 if ($e < 0) {
                     $e = max($len + $e, 0);
                 }
@@ -1698,8 +1698,8 @@ final class VirtualMachine
             }),
             'substring' => new NativeFunction('substring', function (mixed $start = 0, mixed $end = null) use ($str) {
                 $len = mb_strlen($str);
-                $s = max(0, min((int) $start, $len));
-                $e = ($end === null || $end === JsUndefined::Value) ? $len : max(0, min((int) $end, $len));
+                $s = max(0, min(Ops::toInteger($start), $len));
+                $e = ($end === null || $end === JsUndefined::Value) ? $len : max(0, min(Ops::toInteger($end), $len));
                 if ($s > $e) {
                     [$s, $e] = [$e, $s];
                 }
@@ -1714,24 +1714,15 @@ final class VirtualMachine
                 if ($separator === null || $separator === JsUndefined::Value) {
                     return new JsArray([$str]);
                 }
+                $lim = ($limit !== null && $limit !== JsUndefined::Value) ? Ops::toUint32($limit) : null;
                 if ($separator instanceof JsRegex) {
-                    $lim = ($limit !== null && $limit !== JsUndefined::Value) ? (int) $limit : -1;
-                    $parts = preg_split($separator->toPcre(), $str, $lim);
-                    return new JsArray($parts !== false ? $parts : [$str]);
+                    $parts = preg_split($separator->toPcre(), $str);
+                    $parts = $parts !== false ? $parts : [$str];
+                    return new JsArray($lim !== null ? array_slice($parts, 0, $lim) : $parts);
                 }
-                $sep = (string) $separator;
-                if ($sep === '') {
-                    $chars = mb_str_split($str);
-                    if ($limit !== null && $limit !== JsUndefined::Value) {
-                        $chars = array_slice($chars, 0, (int) $limit);
-                    }
-                    return new JsArray($chars);
-                }
-                $parts = explode($sep, $str);
-                if ($limit !== null && $limit !== JsUndefined::Value) {
-                    $parts = array_slice($parts, 0, (int) $limit);
-                }
-                return new JsArray($parts);
+                $sep = self::toJsString($separator);
+                $parts = $sep === '' ? mb_str_split($str) : explode($sep, $str);
+                return new JsArray($lim !== null ? array_slice($parts, 0, $lim) : $parts);
             }),
             'replace' => new NativeFunction('replace', function (mixed $search, mixed $replacement) use ($str, $invoker) {
                 $isCallback = $replacement instanceof JsClosure || $replacement instanceof NativeFunction;
@@ -1740,25 +1731,25 @@ final class VirtualMachine
                     if ($isCallback && $invoker !== null) {
                         $limit = $search->isGlobal() ? -1 : 1;
                         return preg_replace_callback($pcre, function (array $m) use ($replacement, $invoker) {
-                            return (string) $invoker($replacement, $m);
+                            return self::toJsString($invoker($replacement, $m));
                         }, $str, $limit) ?? $str;
                     }
-                    $r = (string) $replacement;
+                    $r = self::toJsString($replacement);
                     if ($search->isGlobal()) {
                         return preg_replace($pcre, $r, $str) ?? $str;
                     }
                     return preg_replace($pcre, $r, $str, 1) ?? $str;
                 }
-                $s = (string) $search;
+                $s = self::toJsString($search);
                 if ($isCallback && $invoker !== null) {
                     $pos = mb_strpos($str, $s);
                     if ($pos === false) {
                         return $str;
                     }
-                    $r = (string) $invoker($replacement, [$s, $pos, $str]);
+                    $r = self::toJsString($invoker($replacement, [$s, $pos, $str]));
                     return mb_substr($str, 0, $pos) . $r . mb_substr($str, $pos + mb_strlen($s));
                 }
-                $r = (string) $replacement;
+                $r = self::toJsString($replacement);
                 $pos = mb_strpos($str, $s);
                 if ($pos === false) {
                     return $str;
@@ -1766,10 +1757,10 @@ final class VirtualMachine
                 return mb_substr($str, 0, $pos) . $r . mb_substr($str, $pos + mb_strlen($s));
             }),
             'replaceAll' => new NativeFunction('replaceAll', function (mixed $search, mixed $replacement) use ($str) {
-                return str_replace((string) $search, (string) $replacement, $str);
+                return str_replace(self::toJsString($search), self::toJsString($replacement), $str);
             }),
             'at' => new NativeFunction('at', function (mixed $index = 0) use ($str) {
-                $i = (int) $index;
+                $i = Ops::toInteger($index);
                 $len = mb_strlen($str);
                 if ($i < 0) {
                     $i += $len;
@@ -1780,12 +1771,11 @@ final class VirtualMachine
                 return mb_substr($str, $i, 1);
             }),
             'repeat' => new NativeFunction('repeat', function (mixed $count = 0) use ($str) {
-                $n = (int) $count;
-                return $n > 0 ? str_repeat($str, $n) : '';
+                return Ops::strRepeat($str, $count);
             }),
             'padStart' => new NativeFunction('padStart', function (mixed $targetLength, mixed $padString = ' ') use ($str) {
-                $target = (int) $targetLength;
-                $pad = (string) $padString;
+                $target = Ops::padLength($targetLength);
+                $pad = self::toJsString($padString);
                 $len = mb_strlen($str);
                 if ($len >= $target || $pad === '') {
                     return $str;
@@ -1795,8 +1785,8 @@ final class VirtualMachine
                 return mb_substr($repeated, 0, $needed) . $str;
             }),
             'padEnd' => new NativeFunction('padEnd', function (mixed $targetLength, mixed $padString = ' ') use ($str) {
-                $target = (int) $targetLength;
-                $pad = (string) $padString;
+                $target = Ops::padLength($targetLength);
+                $pad = self::toJsString($padString);
                 $len = mb_strlen($str);
                 if ($len >= $target || $pad === '') {
                     return $str;
@@ -1808,7 +1798,7 @@ final class VirtualMachine
             'concat' => new NativeFunction('concat', function () use ($str) {
                 $result = $str;
                 foreach (func_get_args() as $arg) {
-                    $result .= (string) $arg;
+                    $result .= self::toJsString($arg);
                 }
                 return $result;
             }),
@@ -1869,25 +1859,19 @@ final class VirtualMachine
     {
         return match ($name) {
             'toFixed' => new NativeFunction('toFixed', function (mixed $digits = 0) use ($num) {
-                return number_format((float) $num, (int) $digits, '.', '');
+                return Ops::toFixed($num, $digits === JsUndefined::Value ? null : $digits);
             }),
             'toPrecision' => new NativeFunction('toPrecision', function (mixed $digits = null) use ($num) {
-                if ($digits === null || $digits === JsUndefined::Value) {
-                    return (string) $num;
-                }
-                $d = (int) $digits;
-                return rtrim(rtrim(sprintf("%.{$d}g", (float) $num), '0'), '.');
+                return Ops::toPrecision($num, $digits === JsUndefined::Value ? null : $digits);
             }),
             'toExponential' => new NativeFunction('toExponential', function (mixed $digits = null) use ($num) {
-                $d = ($digits === null || $digits === JsUndefined::Value) ? 6 : (int) $digits;
-                $s = sprintf("%.{$d}e", (float) $num);
-                return preg_replace('/e([+-])0*(\d)/', 'e$1$2', $s);
+                return Ops::toExponential((float) $num, $digits === JsUndefined::Value ? null : $digits);
             }),
             'toString' => new NativeFunction('toString', function (mixed $radix = null) use ($num) {
                 if ($radix !== null && $radix !== JsUndefined::Value) {
-                    return base_convert((string) (int) $num, 10, (int) $radix);
+                    return Ops::numberToRadix($num, $radix);
                 }
-                return (string) $num;
+                return self::toJsString($num);
             }),
             default => JsUndefined::Value,
         };
@@ -1904,7 +1888,7 @@ final class VirtualMachine
         } elseif ($obj instanceof JsObject) {
             $obj->set($key, $value);
         } elseif ($obj instanceof PhpObjectProxy) {
-            $obj->set((string) $key, $value);
+            $obj->set(self::propertyKey($key), $value);
         }
 
         $this->push($value);
@@ -1988,7 +1972,15 @@ final class VirtualMachine
         return NAN;
     }
 
-    private function toJsString(mixed $value): string
+    /**
+     * JS property key: strings pass through, everything else goes through ToString.
+     */
+    public static function propertyKey(mixed $key): string
+    {
+        return is_string($key) ? $key : self::toJsString($key);
+    }
+
+    public static function toJsString(mixed $value): string
     {
         if (is_string($value)) {
             return $value;
@@ -2013,14 +2005,14 @@ final class VirtualMachine
                 return $value > 0 ? 'Infinity' : '-Infinity';
             }
             // Format like JS: 1.0 → "1", 1.5 → "1.5"
-            return ($value == (int) $value && !is_infinite($value))
+            return ($value > -9.2233720368547758E18 && $value < 9.2233720368547758E18 && $value == (int) $value)
                 ? (string) (int) $value
                 : (string) $value;
         }
         if ($value instanceof JsArray) {
             $parts = [];
             foreach ($value->elements as $el) {
-                $parts[] = $this->toJsString($el);
+                $parts[] = self::toJsString($el);
             }
             return implode(',', $parts);
         }
@@ -2137,8 +2129,8 @@ final class VirtualMachine
             'cbrt'   => new NativeFunction('Math.cbrt', fn(float $n) => $n ** (1/3)),
             'hypot'  => new NativeFunction('Math.hypot', fn(float $a, float $b) => sqrt($a ** 2 + $b ** 2)),
             'sign'   => new NativeFunction('Math.sign', fn(float $n) => $n <=> 0),
-            'trunc'  => new NativeFunction('Math.trunc', fn(float $n) => (int) $n),
-            'clz32'  => new NativeFunction('Math.clz32', fn(float $n) => $n === 0.0 ? 32 : (31 - (int) floor(log(((int) $n) & 0xFFFFFFFF, 2)))),
+            'trunc'  => new NativeFunction('Math.trunc', fn(float $n) => Ops::mathTrunc($n)),
+            'clz32'  => new NativeFunction('Math.clz32', fn(float $n) => Ops::clz32($n)),
             'PI'      => M_PI,
             'E'       => M_E,
             'LN2'     => M_LN2,
@@ -2231,13 +2223,16 @@ final class VirtualMachine
                 return new JsDate((float) $arg);
             }
             // new Date(year, month, day?, hours?, minutes?, seconds?, ms?)
-            $y = (int) $args[0];
-            $m = (int) $args[1] + 1; // JS months are 0-based
-            $d = (int) ($args[2] ?? 1);
-            $h = (int) ($args[3] ?? 0);
-            $i = (int) ($args[4] ?? 0);
-            $s = (int) ($args[5] ?? 0);
-            $ms = (int) ($args[6] ?? 0);
+            $parts = [];
+            foreach ([0, 1, 2, 3, 4, 5, 6] as $k) {
+                $n = (float) Ops::toNumber($args[$k] ?? ($k === 2 ? 1 : 0));
+                if (!is_finite($n)) {
+                    return new JsDate(NAN); // any NaN/Infinity component → Invalid Date, as in JS
+                }
+                $parts[] = Ops::toInteger($n);
+            }
+            [$y, $m, $d, $h, $i, $s, $ms] = $parts;
+            $m += 1; // JS months are 0-based
             $ts = gmmktime($h, $i, $s, $m, $d, $y);
             return new JsDate((float) ($ts * 1000 + $ms));
         }, [
@@ -2266,11 +2261,11 @@ final class VirtualMachine
 
         // ── Number ──
         $parseInt = new NativeFunction('parseInt', function (mixed $str, mixed $radix = null) {
-            $s = trim((string) $str);
+            $s = trim(self::toJsString($str));
             if ($s === '') {
                 return NAN;
             }
-            $base = ($radix !== null && $radix !== JsUndefined::Value) ? (int) $radix : 10;
+            $base = ($radix !== null && $radix !== JsUndefined::Value) ? Ops::toInt32($radix) : 10;
             if ($base === 0) {
                 $base = 10;
             }
@@ -2289,7 +2284,7 @@ final class VirtualMachine
             return NAN;
         });
         $parseFloat = new NativeFunction('parseFloat', function (mixed $str) {
-            $s = trim((string) $str);
+            $s = trim(self::toJsString($str));
             if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/', $s, $m)) {
                 return (float) $m[0];
             }
@@ -2320,7 +2315,7 @@ final class VirtualMachine
             'fromCharCode' => new NativeFunction('String.fromCharCode', function () {
                 $result = '';
                 foreach (func_get_args() as $code) {
-                    $result .= mb_chr((int) $code);
+                    $result .= mb_chr(Ops::toUint32($code) & 0xFFFF);
                 }
                 return $result;
             }),
@@ -2344,7 +2339,7 @@ final class VirtualMachine
 
         // ── RegExp ──
         $env->define('RegExp', new NativeFunction('RegExp', function (mixed $pattern, mixed $flags = '') {
-            return new JsRegex((string) $pattern, (string) ($flags === JsUndefined::Value ? '' : $flags));
+            return new JsRegex(self::toJsString($pattern), (string) ($flags === JsUndefined::Value ? '' : $flags));
         }));
 
         // ── Global functions ──
@@ -2365,17 +2360,17 @@ final class VirtualMachine
         $env->define('undefined', JsUndefined::Value);
 
         // ── URI encoding/decoding ──
-        $env->define('encodeURIComponent', new NativeFunction('encodeURIComponent', fn(mixed $str) => rawurlencode((string) $str)));
-        $env->define('decodeURIComponent', new NativeFunction('decodeURIComponent', fn(mixed $str) => rawurldecode((string) $str)));
+        $env->define('encodeURIComponent', new NativeFunction('encodeURIComponent', fn(mixed $str) => rawurlencode(self::toJsString($str))));
+        $env->define('decodeURIComponent', new NativeFunction('decodeURIComponent', fn(mixed $str) => rawurldecode(self::toJsString($str))));
         $env->define('encodeURI', new NativeFunction('encodeURI', function (mixed $str) {
-            $encoded = rawurlencode((string) $str);
+            $encoded = rawurlencode(self::toJsString($str));
             return str_replace(
                 ['%3A', '%2F', '%3F', '%23', '%5B', '%5D', '%40', '%21', '%24', '%26', '%27', '%28', '%29', '%2A', '%2B', '%2C', '%3B', '%3D'],
                 [':', '/', '?', '#', '[', ']', '@', '!', '$', '&', "'", '(', ')', '*', '+', ',', ';', '='],
                 $encoded
             );
         }));
-        $env->define('decodeURI', new NativeFunction('decodeURI', fn(mixed $str) => rawurldecode((string) $str)));
+        $env->define('decodeURI', new NativeFunction('decodeURI', fn(mixed $str) => rawurldecode(self::toJsString($str))));
 
         return $env;
     }
@@ -2420,6 +2415,9 @@ final class VirtualMachine
         if ($value === JsUndefined::Value) {
             return null;
         }
+        if (is_float($value) && !is_finite($value)) {
+            return null; // JSON has no NaN/Infinity: JSON.stringify() writes null
+        }
         if ($value instanceof JsArray) {
             return array_map(self::toJsonSafe(...), $value->elements);
         }
@@ -2460,7 +2458,7 @@ final class VirtualMachine
         if ($value instanceof PhpObjectProxy) {
             return $value->target;
         }
-        if (is_float($value) && is_finite($value) && $value == (int) $value) {
+        if (is_float($value) && $value > -9.2233720368547758E18 && $value < 9.2233720368547758E18 && $value == (int) $value) {
             return (int) $value;
         }
         return $value;

@@ -237,8 +237,7 @@ static sl_value sl_math_trunc(sl_vm *vm, sl_value *args, int argc) {
 }
 
 static sl_value sl_math_clz32(sl_vm *vm, sl_value *args, int argc) {
-    double n = argc > 0 ? sl_to_number(args[0]) : 0.0;
-    uint32_t x = (uint32_t)(int32_t)n;
+    uint32_t x = argc > 0 ? sl_to_uint32(args[0]) : 0;
     if (x == 0) return sl_val_int(32);
     int count = 0;
     while (!(x & 0x80000000)) {
@@ -541,7 +540,7 @@ sl_native_func *sl_builtin_number_constructor(void) {
 static sl_value sl_string_from_char_code_handler(sl_vm *vm, sl_value *args, int argc) {
     smart_string buf = {0};
     for (int i = 0; i < argc; i++) {
-        zend_long code = (zend_long)sl_to_number(args[i]);
+        zend_long code = (zend_long)(sl_to_uint32(args[i]) & 0xFFFF); /* JS ToUint16 */
         /* Encode codepoint as UTF-8 */
         if (code < 0x80) {
             smart_string_appendc(&buf, (char)code);
@@ -621,13 +620,21 @@ static sl_value sl_date_constructor_handler(sl_vm *vm, sl_value *args, int argc)
         return sl_val_date(sl_date_new(ms));
     }
     /* new Date(year, month, day?, hours?, minutes?, seconds?, ms?) */
-    int year  = (int)sl_to_number(args[0]);
-    int month = (int)sl_to_number(args[1]) + 1; /* JS months 0-based */
-    int day   = argc > 2 ? (int)sl_to_number(args[2]) : 1;
-    int hour  = argc > 3 ? (int)sl_to_number(args[3]) : 0;
-    int min   = argc > 4 ? (int)sl_to_number(args[4]) : 0;
-    int sec   = argc > 5 ? (int)sl_to_number(args[5]) : 0;
-    int ms    = argc > 6 ? (int)sl_to_number(args[6]) : 0;
+    double parts[7] = { 0, 0, 1, 0, 0, 0, 0 };
+    for (int i = 0; i < 7 && i < argc; i++) {
+        parts[i] = sl_to_number(args[i]);
+        /* any NaN/Infinity component is an Invalid Date (as in JS); beyond +-1e9 no date is representable */
+        if (!isfinite(parts[i]) || fabs(parts[i]) > 1e9) {
+            return sl_val_date(sl_date_new(NAN));
+        }
+    }
+    int year  = (int)parts[0];
+    int month = (int)parts[1] + 1; /* JS months 0-based */
+    int day   = (int)parts[2];
+    int hour  = (int)parts[3];
+    int min   = (int)parts[4];
+    int sec   = (int)parts[5];
+    int ms    = (int)parts[6];
 
     struct tm tm_val = {0};
     tm_val.tm_year = year - 1900;
@@ -705,7 +712,12 @@ static void sl_value_to_json_zval(sl_value v, zval *out) {
             ZVAL_LONG(out, v.u.ival);
             break;
         case SL_TAG_DOUBLE:
-            ZVAL_DOUBLE(out, v.u.dval);
+            /* JSON has no NaN/Infinity: JSON.stringify() writes null */
+            if (isfinite(v.u.dval)) {
+                ZVAL_DOUBLE(out, v.u.dval);
+            } else {
+                ZVAL_NULL(out);
+            }
             break;
         case SL_TAG_STRING:
             ZVAL_STR_COPY(out, v.u.str);
@@ -903,7 +915,7 @@ sl_value sl_builtin_parseint(sl_vm *vm, sl_value *args, int argc) {
 
     int base = 10;
     if (argc > 1 && args[1].tag != SL_TAG_UNDEFINED) {
-        base = (int)sl_to_number(args[1]);
+        base = sl_to_int32(args[1]); /* JS: ToInt32(radix), 0 (also NaN/Infinity) means 10 */
         if (base == 0) base = 10;
         if (base < 2 || base > 36) {
             zend_string_release(str);

@@ -496,8 +496,37 @@ final class PhpTranspiler
 
     // ───────────────── Expressions ─────────────────
 
+    /**
+     * True while emitting the object part of a write target (a.b[i].c = v, a[i]++, delete a[i].x).
+     * Member accesses are then emitted as plain PHP lvalue chains ($a['b'][$i]) instead of the
+     * guarded read forms, which are temporaries and cannot be written through.
+     */
+    private bool $lvalueChain = false;
+
+    /** Emit the object of a write target in lvalue-chain mode. */
+    private function emitLvalueBase(Expr $e): string
+    {
+        $prev = $this->lvalueChain;
+        $this->lvalueChain = true;
+        try {
+            return $this->emitExpr($e);
+        } finally {
+            $this->lvalueChain = $prev;
+        }
+    }
+
     private function emitExpr(Expr $e): string
     {
+        if ($this->lvalueChain && !($e instanceof MemberExpr)) {
+            // Only member chains are write targets; anything nested (keys, call args, ...) is a plain read.
+            $this->lvalueChain = false;
+            try {
+                return $this->emitExpr($e);
+            } finally {
+                $this->lvalueChain = true;
+            }
+        }
+
         return match (true) {
             $e instanceof NumberLiteral => $this->emitNumber($e->value),
             $e instanceof StringLiteral => $this->escapeStr($e->value),
@@ -534,11 +563,88 @@ final class PhpTranspiler
         };
     }
 
+    /**
+     * Emit a JS bitwise operation. Operands go through Ops::toInt32/toUint32 so NaN,
+     * Infinity and out-of-range values behave like JS (and never hit PHP's raw
+     * float→int conversion, which warns on PHP 8.5).
+     */
+    private function emitBitwise(string $op, string $l, string $r, bool $rightIsZero = false): string
+    {
+        $o = self::OPS;
+        return match ($op) {
+            '|', '^' => $rightIsZero ? "{$o}::toInt32({$l})" : "({$o}::toInt32({$l}) {$op} {$o}::toInt32({$r}))",
+            '&' => "({$o}::toInt32({$l}) & {$o}::toInt32({$r}))",
+            '<<' => "{$o}::toInt32({$o}::toInt32({$l}) << ({$o}::toUint32({$r}) & 0x1F))",
+            '>>' => "({$o}::toInt32({$l}) >> ({$o}::toUint32({$r}) & 0x1F))",
+            '>>>' => "({$o}::toUint32({$l}) >> ({$o}::toUint32({$r}) & 0x1F))",
+            default => throw new RuntimeException("Transpiler: unknown bitwise op {$op}"),
+        };
+    }
+
+    /**
+     * Emit a computed key for direct PHP indexing. Ints and strings are used as-is;
+     * anything else (floats such as NaN, bools, null) becomes the JS property key.
+     */
+    private function emitArrayKey(Expr $property): string
+    {
+        $key = $this->emitExpr($property);
+        if ($this->isPlainKey($property)) {
+            return $key;
+        }
+        [$ka, $kr] = $this->inlineGuardVar($key, 'k');
+        return "(is_int({$ka}) || is_string({$kr}) ? {$kr} : " . self::OPS . "::arrayKey({$kr}))";
+    }
+
+    /**
+     * Emit a computed read `obj[key]` where obj is a simple variable. Int and string keys
+     * index directly (hot path); any other key (NaN, 1.5, true, ...) goes through
+     * Ops::getIndex, which also handles string targets without PHP's offset errors.
+     */
+    private function emitIndexRead(string $objVar, Expr $property): string
+    {
+        $key = $this->emitExpr($property);
+        if ($this->isPlainKey($property)) {
+            return "{$objVar}[{$key}]";
+        }
+        [$ka, $kr] = $this->inlineGuardVar($key, 'k');
+        return "(is_int({$ka}) || is_string({$kr}) ? {$objVar}[{$kr}] : " . self::OPS . "::getIndex({$objVar}, {$kr}))";
+    }
+
+    /**
+     * Wrap an emitted value that a PHP string function will receive. Single-quoted string
+     * literals pass through; anything else goes through Ops::toString so NaN/Infinity/bools/
+     * arrays get their JS spelling instead of PHP's coercion (which warns for NaN on 8.5).
+     */
+    private function strArg(string $emitted): string
+    {
+        if (preg_match("/^'(?:[^'\\\\]|\\\\.)*'$/s", $emitted)) {
+            return $emitted;
+        }
+        return self::OPS . '::toString(' . $emitted . ')';
+    }
+
+    /**
+     * Keys that are already valid PHP array keys as emitted: string literals/strings and
+     * integral number literals (emitNumber() prints those as int literals).
+     */
+    private function isPlainKey(Expr $property): bool
+    {
+        if ($property instanceof StringLiteral) {
+            return true;
+        }
+        if ($property instanceof NumberLiteral) {
+            $v = $property->value;
+            return is_int($v) || ($v == floor($v) && $v > -9007199254740992.0 && $v < 9007199254740992.0);
+        }
+        return $this->inferType($property) === TypeHint::String;
+    }
+
     private function emitNumber(int|float $v): string
     {
         if (is_nan($v)) return 'NAN';
         if (is_infinite($v)) return $v > 0 ? 'INF' : '-INF';
-        return $v == (int) $v && !is_infinite((float) $v) ? (string)(int)$v : (string)$v;
+        if (is_int($v)) return (string) $v;
+        return $v > -9.2233720368547758E18 && $v < 9.2233720368547758E18 && $v == (int) $v ? (string)(int)$v : var_export($v, true);
     }
 
     private function emitBinary(BinaryExpr $e): string
@@ -590,7 +696,12 @@ final class PhpTranspiler
         }
 
         if ($e->operator === '>>>') {
-            return '(((int)(' . $l . ') & 0xFFFFFFFF) >> ((int)(' . $r . ') & 0x1F))';
+            return '(' . self::OPS . '::toUint32(' . $l . ') >> (' . self::OPS . '::toUint32(' . $r . ') & 0x1F))';
+        }
+
+        // JS bitwise ops work on ToInt32 operands (NaN/Infinity → 0, 32-bit wrap)
+        if (in_array($e->operator, ['&', '|', '^', '<<', '>>'], true)) {
+            return $this->emitBitwise($e->operator, $l, $r, $e->right instanceof NumberLiteral && $e->right->value === 0);
         }
 
         if ($e->operator === 'in') {
@@ -703,7 +814,7 @@ final class PhpTranspiler
 
         return match ($e->operator) {
             '!' => '(!' . $this->emitCondition($e->operand) . ')',
-            '~' => '(~(int)' . $this->emitExpr($e->operand) . ')',
+            '~' => '(~' . self::OPS . '::toInt32(' . $this->emitExpr($e->operand) . '))',
             default => throw new RuntimeException("Transpiler: unknown unary op {$e->operator}"),
         };
     }
@@ -796,9 +907,9 @@ final class PhpTranspiler
     private function emitDelete(DeleteExpr $e): string
     {
         if ($e->operand instanceof MemberExpr) {
-            $obj = $this->emitExpr($e->operand->object);
+            $obj = $this->emitLvalueBase($e->operand->object);
             $key = $e->operand->computed
-                ? $this->emitExpr($e->operand->property)
+                ? $this->emitArrayKey($e->operand->property)
                 : "'" . $e->operand->property->name . "'";
             return "(function() use (&{$obj}) { unset({$obj}[{$key}]); return true; })()";
         }
@@ -838,7 +949,10 @@ final class PhpTranspiler
             return "({$lhs} ?? {$rhs})";
         }
         if ($operator === '>>>=') {
-            return "(((int)({$lhs}) & 0xFFFFFFFF) >> ((int)({$rhs}) & 0x1F))";
+            return $this->emitBitwise('>>>', $lhs, $rhs);
+        }
+        if (in_array($operator, ['&=', '|=', '^=', '<<=', '>>='], true)) {
+            return $this->emitBitwise(substr($operator, 0, -1), $lhs, $rhs);
         }
         if ($operator === '/=') {
             return self::OPS . "::div({$lhs}, {$rhs})";
@@ -901,7 +1015,7 @@ final class PhpTranspiler
             $body .= "{$objVar} = {$objCode}; ";
         }
         if ($keyVar !== null) {
-            $body .= "{$keyVar} = {$keyExpr}; ";
+            $body .= "{$keyVar} = " . self::OPS . "::arrayKey({$keyExpr}); ";
         }
 
         $escapedKey = $namedKey !== null ? $this->escapeStr($namedKey) : null;
@@ -946,7 +1060,7 @@ final class PhpTranspiler
         $objCode = match (true) {
             $member->object instanceof ThisExpr => '$__this',
             $member->object instanceof FunctionExpr => $this->emitFunctionExpr($member->object, forceBox: true),
-            default => $this->emitExpr($member->object),
+            default => $this->emitLvalueBase($member->object),
         };
         $keyExpr = $namedKey === null ? $this->emitExpr($member->property) : null;
         $objVar = '$__mo' . $this->tmpId++;
@@ -1003,12 +1117,12 @@ final class PhpTranspiler
             // Fast path: lhs is string
             if ($lhsType === TypeHint::String) {
                 $this->trackVar($phpName, TypeHint::String);
-                return '($' . $phpName . ' .= (string)(' . $val . '))';
+                return '($' . $phpName . ' .= ' . self::OPS . '::toString(' . $val . '))';
             }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
             $this->trackVar($phpName, TypeHint::Unknown);
-            return '($' . $phpName . " = (is_string({$ta} = \${$phpName}) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
+            return '($' . $phpName . " = (is_string({$ta} = \${$phpName}) | is_string({$tb} = ({$val})) ? " . self::OPS . "::toString({$ta}) . " . self::OPS . "::toString({$tb}) : {$ta} + {$tb}))";
         }
         if ($e->operator === '??=') {
             $this->trackVar($phpName, TypeHint::Unknown);
@@ -1016,7 +1130,7 @@ final class PhpTranspiler
         }
         if ($e->operator === '>>>=') {
             $this->trackVar($phpName, TypeHint::Numeric);
-            return '($' . $phpName . ' = ((int)$' . $phpName . ' & 0xFFFFFFFF) >> ((int)(' . $val . ') & 0x1F))';
+            return '($' . $phpName . ' = ' . $this->emitBitwise('>>>', '$' . $phpName, $val) . ')';
         }
         if ($e->operator === '/=') {
             $this->trackVar($phpName, TypeHint::Numeric);
@@ -1038,6 +1152,9 @@ final class PhpTranspiler
             default => throw new RuntimeException("Transpiler: unknown assign op {$e->operator}"),
         };
         $this->trackVar($phpName, TypeHint::Numeric);
+        if (in_array($op, ['&', '|', '^', '<<', '>>'], true)) {
+            return '($' . $phpName . ' = ' . $this->emitBitwise($op, '$' . $phpName, $val) . ')';
+        }
         return '($' . $phpName . ' = $' . $phpName . " {$op} {$val})";
     }
 
@@ -1137,7 +1254,7 @@ final class PhpTranspiler
     private function emitObject(ObjectLiteral $e): string
     {
         if (empty($e->properties)) {
-            return 'new ' . self::JS_OBJECT . '()';
+            return '(new ' . self::JS_OBJECT . '())';
         }
 
         $allStatic = true;
@@ -1153,7 +1270,7 @@ final class PhpTranspiler
             foreach ($e->properties as $prop) {
                 $pairs[] = $this->escapeStr($prop->key) . ' => ' . $this->emitExpr($prop->value);
             }
-            return 'new ' . self::JS_OBJECT . '([' . implode(', ', $pairs) . '])';
+            return '(new ' . self::JS_OBJECT . '([' . implode(', ', $pairs) . ']))';
         }
 
         $pairs = [];
@@ -1194,8 +1311,7 @@ final class PhpTranspiler
                 }
                 return "(({$tmp} = {$obj}) === null ? null : {$tmp}['{$name}'])";
             }
-            $key = $this->emitExpr($e->property);
-            return "(({$tmp} = {$obj}) === null ? null : {$tmp}[{$key}])";
+            return "(({$tmp} = {$obj}) === null ? null : " . $this->emitIndexRead($tmp, $e->property) . ")";
         }
 
         if (!$e->computed && $e->property instanceof Identifier) {
@@ -1262,11 +1378,23 @@ final class PhpTranspiler
         }
 
         // Computed: obj[expr]
-        $key = $this->emitExpr($e->property);
         if ($objType === TypeHint::Object_) {
-            return "({$obj}->properties[{$key}] ?? null)";
+            return "({$obj}->properties[" . $this->emitArrayKey($e->property) . "] ?? null)";
         }
-        return "{$obj}[{$key}]";
+        if ($this->lvalueChain) {
+            // Part of a write target: keep a plain chain PHP can assign through
+            return "{$obj}[" . $this->emitArrayKey($e->property) . "]";
+        }
+        if ($this->isSimpleVar($obj)) {
+            return $this->emitIndexRead($obj, $e->property);
+        }
+        $p = $e->property;
+        if ($this->isPlainKey($p)) {
+            return "{$obj}[" . $this->emitExpr($p) . "]";
+        }
+        // Complex object expression with a non-literal key: evaluate the object once (before the key, as in JS)
+        $tmp = '$__ix' . ($this->tmpId++);
+        return "(({$tmp} = {$obj}) === null ? null : " . $this->emitIndexRead($tmp, $p) . ")";
     }
 
     private function emitMemberAssign(MemberAssignExpr $e): string
@@ -1275,14 +1403,14 @@ final class PhpTranspiler
         $objCode = match (true) {
             $e->object instanceof ThisExpr => '$__this',
             $e->object instanceof FunctionExpr => $this->emitFunctionExpr($e->object, forceBox: true),
-            default => $this->emitExpr($e->object),
+            default => $this->emitLvalueBase($e->object),
         };
         $simpleBase = $e->object instanceof Identifier || $e->object instanceof ThisExpr;
 
         if (!$e->computed && $e->property instanceof Identifier) {
             $key = "'" . $e->property->name . "'";
         } else {
-            $key = $this->emitExpr($e->property);
+            $key = $this->emitArrayKey($e->property);
         }
 
         if ($e->operator === '=') {
@@ -1299,17 +1427,17 @@ final class PhpTranspiler
             // Fast path: rhs is provably numeric (and obj[key] is used in numeric context)
             if ($rhsType === TypeHint::Numeric) {
                 $ta = '$__t' . $this->tmpId++;
-                return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) ? {$ta} . (string)({$val}) : {$ta} + ({$val})))";
+                return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) ? {$ta} . " . self::OPS . "::toString({$val}) : {$ta} + ({$val})))";
             }
             $ta = '$__t' . $this->tmpId++;
             $tb = '$__t' . $this->tmpId++;
-            return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) | is_string({$tb} = ({$val})) ? (string){$ta} . (string){$tb} : {$ta} + {$tb}))";
+            return "({$objCode}[{$key}] = (is_string({$ta} = {$objCode}[{$key}]) | is_string({$tb} = ({$val})) ? " . self::OPS . "::toString({$ta}) . " . self::OPS . "::toString({$tb}) : {$ta} + {$tb}))";
         }
         if ($e->operator === '??=') {
             return "({$objCode}[{$key}] = {$objCode}[{$key}] ?? {$val})";
         }
         if ($e->operator === '>>>=') {
-            return "({$objCode}[{$key}] = ((int){$objCode}[{$key}] & 0xFFFFFFFF) >> ((int)({$val}) & 0x1F))";
+            return "({$objCode}[{$key}] = " . $this->emitBitwise('>>>', "{$objCode}[{$key}]", $val) . ")";
         }
         if ($e->operator === '/=') {
             return "({$objCode}[{$key}] = " . self::OPS . "::div({$objCode}[{$key}], {$val}))";
@@ -1323,6 +1451,9 @@ final class PhpTranspiler
             '<<=' => '<<', '>>=' => '>>',
             default => throw new RuntimeException("Unknown member assign op {$e->operator}"),
         };
+        if (in_array($op, ['&', '|', '^', '<<', '>>'], true)) {
+            return "({$objCode}[{$key}] = " . $this->emitBitwise($op, "{$objCode}[{$key}]", $val) . ")";
+        }
         return "({$objCode}[{$key}] = {$objCode}[{$key}] {$op} {$val})";
     }
 
@@ -1331,7 +1462,8 @@ final class PhpTranspiler
         // new Date(...)
         if ($e->callee instanceof Identifier && $e->callee->name === 'Date') {
             $args = array_map(fn(Expr $a) => $this->emitExpr($a), $e->arguments);
-            return 'new \\ScriptLite\\Transpiler\\Runtime\\TrDate(' . implode(', ', $args) . ')';
+            // Parenthesized: PHP < 8.4 cannot dereference `new X()` directly (new Date(0).getTime())
+            return '(new \\ScriptLite\\Transpiler\\Runtime\\TrDate(' . implode(', ', $args) . '))';
         }
 
         // new RegExp(pattern, flags)
@@ -1364,7 +1496,7 @@ final class PhpTranspiler
             } elseif ($e->expressions[$i] instanceof StringLiteral || $e->expressions[$i] instanceof TemplateLiteral) {
                 $parts[] = $expr;
             } else {
-                $parts[] = "(is_bool(\$__tv = ({$expr})) ? (\$__tv ? 'true' : 'false') : (\$__tv === null ? 'null' : (string)\$__tv))";
+                $parts[] = "(is_string(\$__tv = ({$expr})) ? \$__tv : " . self::OPS . "::toString(\$__tv))";
             }
             if ($e->quasis[$i + 1] !== '') {
                 $parts[] = $this->escapeStr($e->quasis[$i + 1]);
@@ -1406,11 +1538,11 @@ final class PhpTranspiler
                 'isNaN' => 'is_nan(' . self::OPS . '::toNumber(' . $args[0] . '))',
                 'isFinite' => 'is_finite(' . self::OPS . '::toNumber(' . $args[0] . '))',
                 'parseInt' => self::OPS . '::parseInt(' . implode(', ', $args) . ')',
-                'parseFloat' => '(is_numeric($__pf = (string)(' . $args[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
-                'encodeURIComponent' => 'rawurlencode((string)(' . $args[0] . '))',
-                'decodeURIComponent' => 'rawurldecode((string)(' . $args[0] . '))',
-                'encodeURI' => 'str_replace([\'%3A\', \'%2F\', \'%3F\', \'%23\', \'%5B\', \'%5D\', \'%40\', \'%21\', \'%24\', \'%26\', \'%27\', \'%28\', \'%29\', \'%2A\', \'%2B\', \'%2C\', \'%3B\', \'%3D\'], [\':\', \'/\', \'?\', \'#\', \'[\', \']\', \'@\', \'!\', \'$\', \'&\', "\'", \'(\', \')\', \'*\', \'+\', \',\', \';\', \'=\'], rawurlencode((string)(' . $args[0] . ')))',
-                'decodeURI' => 'rawurldecode((string)(' . $args[0] . '))',
+                'parseFloat' => '(is_numeric($__pf = ' . self::OPS . '::toString(' . $args[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
+                'encodeURIComponent' => 'rawurlencode(' . self::OPS . '::toString(' . $args[0] . '))',
+                'decodeURIComponent' => 'rawurldecode(' . self::OPS . '::toString(' . $args[0] . '))',
+                'encodeURI' => 'str_replace([\'%3A\', \'%2F\', \'%3F\', \'%23\', \'%5B\', \'%5D\', \'%40\', \'%21\', \'%24\', \'%26\', \'%27\', \'%28\', \'%29\', \'%2A\', \'%2B\', \'%2C\', \'%3B\', \'%3D\'], [\':\', \'/\', \'?\', \'#\', \'[\', \']\', \'@\', \'!\', \'$\', \'&\', "\'", \'(\', \')\', \'*\', \'+\', \',\', \';\', \'=\'], rawurlencode(' . self::OPS . '::toString(' . $args[0] . ')))',
+                'decodeURI' => 'rawurldecode(' . self::OPS . '::toString(' . $args[0] . '))',
                 default => null,
             };
             if ($mapped !== null) {
@@ -1531,12 +1663,12 @@ final class PhpTranspiler
         if ($callee->object instanceof Identifier && $callee->object->name === 'Math') {
             $a = $emitArgs();
             return match ($method) {
-                'floor' => '(int)floor(' . $a[0] . ')',
-                'ceil' => '(int)ceil(' . $a[0] . ')',
+                'floor' => self::OPS . '::integral(floor(' . $a[0] . '))',
+                'ceil' => self::OPS . '::integral(ceil(' . $a[0] . '))',
                 'abs' => 'abs(' . $a[0] . ')',
                 'max' => 'max(' . implode(', ', $a) . ')',
                 'min' => 'min(' . implode(', ', $a) . ')',
-                'round' => '(int)round(' . $a[0] . ')',
+                'round' => self::OPS . '::integral(round(' . $a[0] . '))',
                 'random' => '(mt_rand() / mt_getrandmax())',
                 'sqrt' => 'sqrt(' . $a[0] . ')',
                 'pow' => '((' . $a[0] . ') ** (' . $a[1] . '))',
@@ -1554,8 +1686,8 @@ final class PhpTranspiler
                 'cbrt' => '((' . $a[0] . ') ** (1/3))',
                 'hypot' => 'sqrt((' . $a[0] . ') ** 2 + (' . $a[1] . ') ** 2)',
                 'sign' => '((' . $a[0] . ') <=> 0)',
-                'trunc' => '(int)(' . $a[0] . ')',
-                'clz32' => '(' . $a[0] . ' === 0 ? 32 : (31 - (int)floor(log((' . $a[0] . ') & 0xFFFFFFFF, 2))))',
+                'trunc' => self::OPS . '::mathTrunc(' . $a[0] . ')',
+                'clz32' => self::OPS . '::clz32(' . $a[0] . ')',
                 default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
@@ -1563,7 +1695,7 @@ final class PhpTranspiler
         // ── console.log ──
         if ($callee->object instanceof Identifier && $callee->object->name === 'console' && $method === 'log') {
             $a = $emitArgs();
-            return '(($__out .= implode(" ", array_map("strval", [' . implode(', ', $a) . '])) . "\\n") ? null : null)';
+            return '(($__out .= implode(" ", array_map([' . self::OPS . '::class, "toString"], [' . implode(', ', $a) . '])) . "\\n") ? null : null)';
         }
 
         // ── Date.* ──
@@ -1607,11 +1739,11 @@ final class PhpTranspiler
             $a = $emitArgs();
             $t = '$__t' . $this->tmpId++;
             return match ($method) {
-                'isInteger' => "(is_int({$t} = {$a[0]}) || (is_float({$t}) && {$t} == (int){$t}))",
+                'isInteger' => "(is_int({$t} = {$a[0]}) || (is_float({$t}) && is_finite({$t}) && {$t} == floor({$t})))",
                 'isFinite' => "(is_int({$t} = {$a[0]}) || (is_float({$t}) && is_finite({$t})))",
                 'isNaN' => "(is_float({$t} = {$a[0]}) && is_nan({$t}))",
                 'parseInt' => self::OPS . '::parseInt(' . implode(', ', $a) . ')',
-                'parseFloat' => '(is_numeric($__pf = (string)(' . $a[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
+                'parseFloat' => '(is_numeric($__pf = ' . self::OPS . '::toString(' . $a[0] . ')) ? ($__pf + 0) : (preg_match(\'/^([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)/\', trim($__pf), $__pfm) ? ($__pfm[1] + 0) : NAN))',
                 default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
@@ -1630,7 +1762,7 @@ final class PhpTranspiler
         if ($callee->object instanceof Identifier && $callee->object->name === 'String') {
             $a = $emitArgs();
             return match ($method) {
-                'fromCharCode' => 'implode("", array_map(fn($c) => mb_chr((int)$c, "UTF-8"), [' . implode(', ', $a) . ']))',
+                'fromCharCode' => 'implode("", array_map(fn($c) => mb_chr(' . self::OPS . '::toUint32($c) & 0xFFFF, "UTF-8"), [' . implode(', ', $a) . ']))',
                 default => $this->emitRuntimeCall($dynamicMethod, $a),
             };
         }
@@ -1639,12 +1771,12 @@ final class PhpTranspiler
         if ($method === 'toFixed' || $method === 'toPrecision' || $method === 'toExponential' || $method === 'toString') {
             $a = $emitArgs();
             return match ($method) {
-                'toFixed' => 'number_format((float)(' . $obj . '), (int)(' . ($a[0] ?? '0') . '), \'.\', \'\')',
-                'toPrecision' => self::OPS . '::toPrecision((float)(' . $obj . '), (int)(' . ($a[0] ?? '0') . '))',
+                'toFixed' => self::OPS . '::toFixed(' . $obj . ', ' . ($a[0] ?? 'null') . ')',
+                'toPrecision' => self::OPS . '::toPrecision(' . $obj . ', ' . ($a[0] ?? 'null') . ')',
                 'toExponential' => self::OPS . '::toExponential((float)(' . $obj . '), ' . ($a[0] ?? 'null') . ')',
                 'toString' => isset($a[0])
-                    ? 'base_convert((string)(int)(' . $obj . '), 10, (int)(' . $a[0] . '))'
-                    : '(string)(' . $obj . ')',
+                    ? self::OPS . '::numberToRadix(' . $obj . ', ' . $a[0] . ')'
+                    : self::OPS . '::toString(' . $obj . ')',
             };
         }
 
@@ -1691,20 +1823,23 @@ final class PhpTranspiler
             'some' => $this->emitArrayPredicateLoop($obj, $a[0], 'some', $use),
             'find' => $this->emitArrayPredicateLoop($obj, $a[0], 'find', $use),
             'findIndex' => $this->emitArrayPredicateLoop($obj, $a[0], 'findIndex', $use),
-            'join' => 'implode(' . ($a[0] ?? "','") . ', ' . $obj . ')',
+            'join' => self::OPS . '::join(' . $obj . (isset($a[0]) ? ', ' . $a[0] : '') . ')',
             'concat' => $this->emitConcat($obj, $a, $objectType),
             'indexOf' => $this->emitIndexOf($obj, $a),
             'includes' => $this->emitIncludes($obj, $a),
             'slice' => $this->emitSlice($obj, $a),
             'sort' => isset($a[0])
                 ? $this->emitArraySort($obj, $a[0], $use)
-                : "(function(){$use} { usort({$obj}, function(\$a, \$b) { return strcmp((string)\$a, (string)\$b); }); return {$obj}; })()",
+                : "(function(){$use} { usort({$obj}, function(\$a, \$b) { return strcmp(" . self::OPS . "::toString(\$a), " . self::OPS . "::toString(\$b)); }); return {$obj}; })()",
             'reverse' => 'array_reverse(' . $obj . ')',
             'flat' => $this->emitFlat($obj, $a),
             'splice' => count($a) > 2
-                ? 'array_splice(' . $obj . ', ' . $a[0] . ', ' . $a[1] . ', [' . implode(', ', array_slice($a, 2)) . '])'
-                : 'array_splice(' . $obj . ', ' . implode(', ', $a) . ')',
-            'fill' => "(function(){$use} { for (\$__i = " . ($a[1] ?? '0') . "; \$__i < " . ($a[2] ?? 'count(' . $obj . ')') . "; \$__i++) { {$obj}[\$__i] = {$a[0]}; } return {$obj}; })()",
+                ? 'array_splice(' . $obj . ', ' . self::OPS . '::toInteger(' . $a[0] . '), max(0, ' . self::OPS . '::toInteger(' . $a[1] . ')), [' . implode(', ', array_slice($a, 2)) . '])'
+                : (count($a) === 2
+                    ? 'array_splice(' . $obj . ', ' . self::OPS . '::toInteger(' . $a[0] . '), max(0, ' . self::OPS . '::toInteger(' . $a[1] . ')))'
+                    : 'array_splice(' . $obj . ', ' . self::OPS . '::toInteger(' . ($a[0] ?? '0') . '))'),
+            // In place for assignable targets ($a, $a['k']); a filled copy for temporaries ([1, 2].fill(0))
+            'fill' => self::OPS . (preg_match('/^\$\w+(\[[^\[\]]*\])*$/', $obj) ? '::arrayFill(' : '::arrayFilled(') . $obj . ', ' . implode(', ', $a) . ')',
             'findLast' => $this->emitArrayPredicateLoop($obj, $a[0], 'findLast', $use),
             'findLastIndex' => $this->emitArrayPredicateLoop($obj, $a[0], 'findLastIndex', $use),
             'flatMap' => $this->emitArrayFlatMap($obj, $a[0], $use),
@@ -1721,20 +1856,20 @@ final class PhpTranspiler
             'substring' => $this->emitSubstring($obj, $a),
             'startsWith' => $this->emitStartsWith($obj, $a),
             'endsWith' => $this->emitEndsWith($obj, $a),
-            'repeat' => 'str_repeat(' . $obj . ', (int)' . $a[0] . ')',
+            'repeat' => self::OPS . '::strRepeat(' . $obj . ', ' . ($a[0] ?? '0') . ')',
             'replace' => $this->emitStrReplace($obj, $a, $args),
-            'replaceAll' => 'str_replace(' . $a[0] . ', ' . $a[1] . ', ' . $obj . ')',
+            'replaceAll' => 'str_replace(' . $this->strArg($a[0]) . ', ' . $this->strArg($a[1]) . ', ' . $obj . ')',
             'match' => $this->emitStrMatch($obj, $a, $args),
             'matchAll' => $this->emitStrMatchAll($obj, $a, $args),
             'search' => $this->emitStrSearch($obj, $a, $args),
             'padStart' => $this->emitPadStart($obj, $a),
             'padEnd' => $this->emitPadEnd($obj, $a),
             'lastIndexOf' => $this->emitLastIndexOf($obj, $a),
-            'at' => self::OPS . '::at(' . $obj . ', (int)(' . $a[0] . '))',
+            'at' => self::OPS . '::at(' . $obj . ', ' . self::OPS . '::toInteger(' . ($a[0] ?? '0') . '))',
 
             // ── Object methods ──
             'hasOwnProperty' => $objectType === TypeHint::Object_
-                ? "array_key_exists({$a[0]}, {$obj}->properties)"
+                ? "array_key_exists(" . self::OPS . "::toPropertyKey({$a[0]}), {$obj}->properties)"
                 : self::OPS . '::hasOwn(' . $obj . ', ' . $a[0] . ')',
 
             // ── Unknown method → property access returning function ──
@@ -1804,7 +1939,7 @@ final class PhpTranspiler
     private function emitArraySort(string $obj, string $callback, string $use): string
     {
         return "(function(){$use} { \$__cb = " . self::OPS . "::assertFunction({$callback}); "
-            . "usort({$obj}, fn(\$__a, \$__b) => (int)\$__cb(\$__a, \$__b)); "
+            . "usort({$obj}, fn(\$__a, \$__b) => " . self::OPS . "::compareResult(\$__cb(\$__a, \$__b))); "
             . "return {$obj}; })()";
     }
 
@@ -1820,14 +1955,12 @@ final class PhpTranspiler
 
     private function emitSlice(string $obj, array $a): string
     {
-        $start = $a[0];
+        $start = $a[0] ?? 'null';
         $t = '$__t' . $this->tmpId++;
         // For strings: handle negative indices per JS spec using Ops::slice
-        $strSlice = self::OPS . "::strSlice({$t}, (int)({$start})" . (isset($a[1]) ? ", (int)({$a[1]})" : "") . ")";
-        // For arrays: use array_slice with negative support
-        $arrSlice = isset($a[1])
-            ? "array_slice({$t}, {$start}, {$a[1]} - {$start})"
-            : "array_slice({$t}, {$start})";
+        $strSlice = self::OPS . "::strSlice({$t}, " . self::OPS . "::toInteger({$start})" . (isset($a[1]) ? ", " . self::OPS . "::toInteger({$a[1]})" : "") . ")";
+        // For arrays: JS slice semantics (negative/NaN/Infinity indices)
+        $arrSlice = self::OPS . "::arraySlice({$t}, {$start}" . (isset($a[1]) ? ", {$a[1]}" : "") . ")";
         return "(is_string({$t} = {$obj}) ? {$strSlice} : {$arrSlice})";
     }
 
@@ -1845,20 +1978,21 @@ final class PhpTranspiler
             $sepValue = $argExprs[0]->value;
             if ($sepValue === '') {
                 return $limit !== null
-                    ? "array_slice(mb_str_split({$obj}), 0, (int)({$limit}))"
+                    ? "array_slice(mb_str_split({$obj}), 0, " . self::OPS . "::toUint32({$limit}))"
                     : "mb_str_split({$obj})";
             }
             return $limit !== null
-                ? "array_slice(explode({$sep}, {$obj}), 0, (int)({$limit}))"
+                ? "array_slice(explode({$sep}, {$obj}), 0, " . self::OPS . "::toUint32({$limit}))"
                 : "explode({$sep}, {$obj})";
         }
 
         // Slow path: separator might be a regex — need IIFE for branching
         $use = $this->makeUseClause();
         return "(function(){$use} { \$__s = {$sep}; \$__o = {$obj}; "
-            . "if (is_array(\$__s) && (\$__s['__re'] ?? false)) return preg_split(\$__s['pcre'], \$__o" . ($limit !== null ? ", (int)({$limit})" : "") . "); "
-            . "if (\$__s === '') return " . ($limit !== null ? "array_slice(mb_str_split(\$__o), 0, (int)({$limit}))" : "mb_str_split(\$__o)") . "; "
-            . "return " . ($limit !== null ? "array_slice(explode(\$__s, \$__o), 0, (int)({$limit}))" : "explode(\$__s, \$__o)") . "; })()";
+            . "if (is_array(\$__s) && (\$__s['__re'] ?? false)) return " . ($limit !== null ? "array_slice(preg_split(\$__s['pcre'], \$__o), 0, " . self::OPS . "::toUint32({$limit}))" : "preg_split(\$__s['pcre'], \$__o)") . "; "
+            . "if (!is_string(\$__s)) \$__s = " . self::OPS . "::toString(\$__s); "
+            . "if (\$__s === '') return " . ($limit !== null ? "array_slice(mb_str_split(\$__o), 0, " . self::OPS . "::toUint32({$limit}))" : "mb_str_split(\$__o)") . "; "
+            . "return " . ($limit !== null ? "array_slice(explode(\$__s, \$__o), 0, " . self::OPS . "::toUint32({$limit}))" : "explode(\$__s, \$__o)") . "; })()";
     }
 
     private function emitStrReplace(string $obj, array $a, array $argExprs): string
@@ -1871,28 +2005,29 @@ final class PhpTranspiler
             $pcre = $this->jsToPcre($argExprs[0]->pattern, $argExprs[0]->flags);
             $limit = str_contains($argExprs[0]->flags, 'g') ? '-1' : '1';
             if ($isCallback) {
-                return "preg_replace_callback({$pcre}, function(\$__m) { \$__cb = " . self::OPS . "::assertFunction({$a[1]}); return (string)\$__cb(...\$__m); }, {$obj}, {$limit})";
+                return "preg_replace_callback({$pcre}, function(\$__m) { \$__cb = " . self::OPS . "::assertFunction({$a[1]}); return " . self::OPS . "::toString(\$__cb(...\$__m)); }, {$obj}, {$limit})";
             }
             if ($maybeCallback) {
                 $use = $this->makeUseClause();
                 return "(function(){$use} { \$__cb = {$a[1]}; return " . self::OPS . "::isFunction(\$__cb) "
-                    . "? preg_replace_callback({$pcre}, function(\$__m) use (&\$__cb) { return (string)\$__cb(...\$__m); }, {$obj}, {$limit}) "
-                    . ": preg_replace({$pcre}, \$__cb, {$obj}, {$limit}); })()";
+                    . "? preg_replace_callback({$pcre}, function(\$__m) use (&\$__cb) { return " . self::OPS . "::toString(\$__cb(...\$__m)); }, {$obj}, {$limit}) "
+                    . ": preg_replace({$pcre}, " . self::OPS . "::toString(\$__cb), {$obj}, {$limit}); })()";
             }
             return "preg_replace({$pcre}, {$a[1]}, {$obj}, {$limit})";
         }
         $use = $this->makeUseClause();
+        $a[0] = $this->strArg($a[0]);
         if ($isCallback) {
             return "(function(){$use} { \$__p = strpos({$obj}, {$a[0]}); "
                 . "\$__cb = " . self::OPS . "::assertFunction({$a[1]}); "
-                . "return \$__p === false ? {$obj} : substr({$obj}, 0, \$__p) . (string)\$__cb({$a[0]}, \$__p, {$obj}) . substr({$obj}, \$__p + strlen({$a[0]})); })()";
+                . "return \$__p === false ? {$obj} : substr({$obj}, 0, \$__p) . " . self::OPS . "::toString(\$__cb({$a[0]}, \$__p, {$obj})) . substr({$obj}, \$__p + strlen({$a[0]})); })()";
         }
         if ($maybeCallback) {
             return "(function(){$use} { \$__cb = {$a[1]}; \$__p = strpos({$obj}, {$a[0]}); "
                 . "if (\$__p === false) return {$obj}; "
                 . "return " . self::OPS . "::isFunction(\$__cb) "
-                . "? substr({$obj}, 0, \$__p) . (string)\$__cb({$a[0]}, \$__p, {$obj}) . substr({$obj}, \$__p + strlen({$a[0]})) "
-                . ": substr({$obj}, 0, \$__p) . \$__cb . substr({$obj}, \$__p + strlen({$a[0]})); })()";
+                . "? substr({$obj}, 0, \$__p) . " . self::OPS . "::toString(\$__cb({$a[0]}, \$__p, {$obj})) . substr({$obj}, \$__p + strlen({$a[0]})) "
+                . ": substr({$obj}, 0, \$__p) . " . self::OPS . "::toString(\$__cb) . substr({$obj}, \$__p + strlen({$a[0]})); })()";
         }
         return "(function(){$use} { \$__p = strpos({$obj}, {$a[0]}); "
             . "return \$__p === false ? {$obj} : substr({$obj}, 0, \$__p) . {$a[1]} . substr({$obj}, \$__p + strlen({$a[0]})); })()";
@@ -1939,41 +2074,42 @@ final class PhpTranspiler
         $t = '$__t' . $this->tmpId++;
         $t2 = '$__t' . $this->tmpId++;
         // JS charAt: negative or OOB index returns '', not wrap-around
-        return "(({$t} = (int)({$a[0]})) < 0 || {$t} >= mb_strlen({$t2} = {$obj}, 'UTF-8') ? '' : mb_substr({$t2}, {$t}, 1, 'UTF-8'))";
+        return "(({$t} = " . self::OPS . "::toInteger(" . ($a[0] ?? '0') . ")) < 0 || {$t} >= mb_strlen({$t2} = {$obj}, 'UTF-8') ? '' : mb_substr({$t2}, {$t}, 1, 'UTF-8'))";
     }
 
     private function emitCharCodeAt(string $obj, array $a): string
     {
         $t = '$__t' . $this->tmpId++;
-        return "(({$t} = mb_substr({$obj}, (int)({$a[0]}), 1, 'UTF-8')) === '' || {$t} === false ? NAN : mb_ord({$t}, 'UTF-8'))";
+        return "(({$t} = mb_substr({$obj}, " . self::OPS . "::toInteger(" . ($a[0] ?? '0') . "), 1, 'UTF-8')) === '' || {$t} === false ? NAN : mb_ord({$t}, 'UTF-8'))";
     }
 
     private function emitSubstring(string $obj, array $a): string
     {
         $use = $this->makeUseClause();
         if (!isset($a[1])) {
-            return "mb_substr({$obj}, (int)({$a[0]}), null, 'UTF-8')";
+            return "mb_substr({$obj}, max(0, " . self::OPS . "::toInteger(" . ($a[0] ?? '0') . ")), null, 'UTF-8')";
         }
-        // JS substring swaps if start > end
-        return "(function(){$use} { \$__s = (int)({$a[0]}); \$__e = (int)({$a[1]}); if (\$__s > \$__e) [\$__s, \$__e] = [\$__e, \$__s]; return mb_substr({$obj}, \$__s, \$__e - \$__s, 'UTF-8'); })()";
+        // JS substring clamps negatives to 0 and swaps if start > end
+        return "(function(){$use} { \$__s = max(0, " . self::OPS . "::toInteger({$a[0]})); \$__e = max(0, " . self::OPS . "::toInteger({$a[1]})); if (\$__s > \$__e) [\$__s, \$__e] = [\$__e, \$__s]; return mb_substr({$obj}, \$__s, \$__e - \$__s, 'UTF-8'); })()";
     }
 
     private function emitStartsWith(string $obj, array $a): string
     {
         if (!isset($a[1])) {
-            return 'str_starts_with(' . $obj . ', ' . $a[0] . ')';
+            return 'str_starts_with(' . $obj . ', ' . $this->strArg($a[0]) . ')';
         }
         // startsWith with position: check from offset
-        return "(mb_substr({$obj}, (int)({$a[1]}), mb_strlen({$a[0]}, 'UTF-8'), 'UTF-8') === {$a[0]})";
+        $p = $this->strArg($a[0]);
+        return "(mb_substr({$obj}, " . self::OPS . "::toInteger({$a[1]}), mb_strlen({$p}, 'UTF-8'), 'UTF-8') === {$p})";
     }
 
     private function emitEndsWith(string $obj, array $a): string
     {
         if (!isset($a[1])) {
-            return 'str_ends_with(' . $obj . ', ' . $a[0] . ')';
+            return 'str_ends_with(' . $obj . ', ' . $this->strArg($a[0]) . ')';
         }
         // endsWith with endPosition: check within first N chars
-        return "str_ends_with(mb_substr({$obj}, 0, (int)({$a[1]}), 'UTF-8'), {$a[0]})";
+        return "str_ends_with(mb_substr({$obj}, 0, max(0, " . self::OPS . "::toInteger({$a[1]})), 'UTF-8'), " . $this->strArg($a[0]) . ")";
     }
 
     private function emitIndexOf(string $obj, array $a): string
@@ -1981,21 +2117,21 @@ final class PhpTranspiler
         $t = '$__t' . $this->tmpId++;
         if (!isset($a[1])) {
             // No fromIndex — dispatch on string vs array
-            return "(is_string({$t} = {$obj}) ? (({$t} = mb_strpos({$t}, {$a[0]}, 0, 'UTF-8')) === false ? -1 : {$t}) : (({$t} = array_search({$a[0]}, {$t}, true)) === false ? -1 : {$t}))";
+            return "(is_string({$t} = {$obj}) ? (({$t} = mb_strpos({$t}, " . $this->strArg($a[0]) . ", 0, 'UTF-8')) === false ? -1 : {$t}) : (({$t} = array_search({$a[0]}, {$t}, true)) === false ? -1 : {$t}))";
         }
         // With fromIndex
         $t2 = '$__t' . $this->tmpId++;
-        return "(is_string({$t} = {$obj}) ? (({$t2} = mb_strpos({$t}, {$a[0]}, max(0, (int)({$a[1]})), 'UTF-8')) === false ? -1 : {$t2}) : (({$t2} = array_search({$a[0]}, array_slice({$t}, (int)({$a[1]}), null, true), true)) === false ? -1 : {$t2}))";
+        return "(is_string({$t} = {$obj}) ? (({$t2} = mb_strpos({$t}, " . $this->strArg($a[0]) . ", min(max(0, " . self::OPS . "::toInteger({$a[1]})), mb_strlen({$t}, 'UTF-8')), 'UTF-8')) === false ? -1 : {$t2}) : (({$t2} = array_search({$a[0]}, array_slice({$t}, " . self::OPS . "::toInteger({$a[1]}), null, true), true)) === false ? -1 : {$t2}))";
     }
 
     private function emitIncludes(string $obj, array $a): string
     {
         $t = '$__t' . $this->tmpId++;
         if (!isset($a[1])) {
-            return "(is_string({$t} = {$obj}) ? str_contains({$t}, {$a[0]}) : in_array({$a[0]}, {$t}, true))";
+            return "(is_string({$t} = {$obj}) ? str_contains({$t}, " . $this->strArg($a[0]) . ") : in_array({$a[0]}, {$t}, true))";
         }
         // With fromIndex
-        return "(is_string({$t} = {$obj}) ? str_contains(mb_substr({$t}, (int)({$a[1]}), null, 'UTF-8'), {$a[0]}) : in_array({$a[0]}, array_slice({$t}, (int)({$a[1]})), true))";
+        return "(is_string({$t} = {$obj}) ? str_contains(mb_substr({$t}, " . self::OPS . "::toInteger({$a[1]}), null, 'UTF-8'), " . $this->strArg($a[0]) . ") : in_array({$a[0]}, array_slice({$t}, " . self::OPS . "::toInteger({$a[1]})), true))";
     }
 
     /**
@@ -2049,33 +2185,34 @@ final class PhpTranspiler
         }
 
         // Known string type: skip the check
+        $strArgs = array_map(fn(string $x): string => $this->strArg($x), $a);
         if ($objType === TypeHint::String) {
-            return $obj . ' . ' . implode(' . ', $a);
+            return $obj . ' . ' . implode(' . ', $strArgs);
         }
 
         // Unknown: cache object in temp var to prevent re-evaluation
         $t = '$__t' . $this->tmpId++;
-        $strConcat = $t . ' . ' . implode(' . ', $a);
+        $strConcat = $t . ' . ' . implode(' . ', $strArgs);
         $arrConcat = 'array_merge(' . $t . ', ' . implode(', ', array_map($wrapArg, $a)) . ')';
         return "(is_string({$t} = {$obj}) ? {$strConcat} : {$arrConcat})";
     }
 
     private function emitPadStart(string $obj, array $a): string
     {
-        $fillStr = $a[1] ?? "' '";
-        return "str_pad({$obj}, (int)({$a[0]}), {$fillStr}, STR_PAD_LEFT)";
+        $fillStr = isset($a[1]) ? $this->strArg($a[1]) : "' '";
+        return "str_pad({$obj}, " . self::OPS . "::padLength({$a[0]}), {$fillStr}, STR_PAD_LEFT)";
     }
 
     private function emitPadEnd(string $obj, array $a): string
     {
-        $fillStr = $a[1] ?? "' '";
-        return "str_pad({$obj}, (int)({$a[0]}), {$fillStr}, STR_PAD_RIGHT)";
+        $fillStr = isset($a[1]) ? $this->strArg($a[1]) : "' '";
+        return "str_pad({$obj}, " . self::OPS . "::padLength({$a[0]}), {$fillStr}, STR_PAD_RIGHT)";
     }
 
     private function emitLastIndexOf(string $obj, array $a): string
     {
         $t = '$__t' . $this->tmpId++;
-        return "(({$t} = mb_strrpos({$obj}, {$a[0]}, 0, 'UTF-8')) === false ? -1 : {$t})";
+        return "(({$t} = mb_strrpos({$obj}, " . $this->strArg($a[0]) . ", 0, 'UTF-8')) === false ? -1 : {$t})";
     }
 
     // ───────────────── Closures / Functions ─────────────────
@@ -2208,7 +2345,7 @@ final class PhpTranspiler
             . "}";
 
         if ($boxFunction) {
-            return 'new ' . self::JS_FUNCTION . '(' . $closure . ')';
+            return '(new ' . self::JS_FUNCTION . '(' . $closure . '))';
         }
 
         return $closure;

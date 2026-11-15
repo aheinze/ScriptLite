@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Runtime;
 
+use ScriptLite\Vm\VirtualMachine;
+
 /**
  * Runtime representation of a JavaScript RegExp object.
  */
@@ -49,7 +51,7 @@ final class JsRegex
             'multiline' => str_contains($this->flags, 'm'),
             'lastIndex' => $this->lastIndex,
             'test' => new NativeFunction('test', function (mixed $str) {
-                $s = (string) $str;
+                $s = VirtualMachine::toJsString($str);
                 $pcre = $this->toPcre();
                 if ($this->isGlobal()) {
                     $result = preg_match($pcre, $s, $m, 0, $this->lastIndex);
@@ -63,7 +65,7 @@ final class JsRegex
                 return preg_match($pcre, $s) === 1;
             }),
             'exec' => new NativeFunction('exec', function (mixed $str) {
-                $s = (string) $str;
+                $s = VirtualMachine::toJsString($str);
                 $pcre = $this->toPcre();
                 $offset = $this->isGlobal() ? $this->lastIndex : 0;
 

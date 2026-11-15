@@ -83,6 +83,109 @@ final class Ops
     }
 
     /**
+     * JS ToInt32: the operand conversion of the bitwise operators.
+     *
+     * NaN and ±Infinity become 0 and everything else wraps modulo 2^32 into the
+     * signed 32-bit range. Never uses a raw (int) cast on a value that may not
+     * fit, because PHP 8.5 warns on those.
+     *
+     * Shared by the VM and the transpiler runtime.
+     */
+    public static function toInt32(mixed $v): int
+    {
+        if (is_int($v)) {
+            if ($v >= -0x80000000 && $v <= 0x7FFFFFFF) {
+                return $v;
+            }
+            $v &= 0xFFFFFFFF;
+            return $v > 0x7FFFFFFF ? $v - 0x100000000 : $v;
+        }
+
+        $n = is_float($v) ? $v : (float) self::toNumber($v);
+        if (is_nan($n) || is_infinite($n)) {
+            return 0;
+        }
+        if ($n >= -2147483648.0 && $n < 2147483648.0) {
+            return (int) $n;
+        }
+
+        // Integral doubles are exact under fmod, so this is the true modulo 2^32.
+        $n = fmod($n < 0 ? ceil($n) : floor($n), 4294967296.0);
+        if ($n < 0) {
+            $n += 4294967296.0;
+        }
+        $i = (int) $n;
+        return $i > 0x7FFFFFFF ? $i - 0x100000000 : $i;
+    }
+
+    /**
+     * JS ToUint32 (operand of >>> and of shift counts).
+     */
+    public static function toUint32(mixed $v): int
+    {
+        return self::toInt32($v) & 0xFFFFFFFF;
+    }
+
+    /**
+     * JS ToIntegerOrInfinity as a PHP int: for index, position and count arguments.
+     *
+     * NaN becomes 0, finite values truncate toward zero, and ±Infinity (or any
+     * magnitude beyond 2^53) clamps to ±2^53. That is past every real string or
+     * array length, so callers that clamp to the length get the JS result.
+     */
+    public static function toInteger(mixed $v): int
+    {
+        if (is_int($v)) {
+            return $v;
+        }
+
+        $n = is_float($v) ? $v : (float) self::toNumber($v);
+        if (is_nan($n)) {
+            return 0;
+        }
+        if ($n >= 9007199254740992.0) {
+            return 9007199254740992;
+        }
+        if ($n <= -9007199254740992.0) {
+            return -9007199254740992;
+        }
+        return (int) $n;
+    }
+
+    /**
+     * Result of a JS sort comparator as -1/0/1 (NaN counts as 0, fractions keep their sign).
+     */
+    public static function compareResult(mixed $v): int
+    {
+        $n = is_int($v) || is_float($v) ? $v : self::toNumber($v);
+        return $n > 0 ? 1 : ($n < 0 ? -1 : 0);
+    }
+
+    /**
+     * Number -> string for the cases PHP spells differently (NaN, Infinity).
+     */
+    public static function numberToString(int|float $v): string
+    {
+        if (is_float($v)) {
+            if (is_nan($v)) {
+                return 'NaN';
+            }
+            if (is_infinite($v)) {
+                return $v > 0 ? 'Infinity' : '-Infinity';
+            }
+        }
+        return (string) $v;
+    }
+
+    /**
+     * Throw a JS RangeError (same exception shape as the other runtime errors).
+     */
+    public static function rangeError(string $message): never
+    {
+        throw new \RuntimeException('RangeError: ' . $message);
+    }
+
+    /**
      * JS ToString / ToPrimitive -> string.
      *
      * Safe conversion for any PHP type — never throws.
@@ -99,7 +202,7 @@ final class Ops
             return $v ? 'true' : 'false';
         }
         if (is_int($v) || is_float($v)) {
-            return (string) $v;
+            return self::numberToString($v);
         }
         if ($v instanceof JSFunction || $v instanceof \Closure) {
             return 'function() { [native code] }';
@@ -335,6 +438,19 @@ final class Ops
     public static function getProp(mixed $target, mixed $key): mixed
     {
         return self::getNamedProp($target, self::toPropertyKey($key));
+    }
+
+    /**
+     * Computed read obj[key] for keys that are not a PHP int/string (NaN, 1.5, true, ...).
+     */
+    public static function getIndex(mixed $target, mixed $key): mixed
+    {
+        if (is_string($target)) {
+            $k = self::arrayKey($key);
+            return is_int($k) && $k >= 0 && $k < strlen($target) ? $target[$k] : null;
+        }
+
+        return self::getProp($target, $key);
     }
 
     /**
@@ -697,12 +813,13 @@ final class Ops
      */
     public static function parseInt(mixed $str, mixed $radix = null): int|float
     {
-        $s = is_string($str) ? trim($str) : (string) $str;
+        $s = trim(is_string($str) ? $str : self::toString($str));
         if ($s === '') {
             return NAN;
         }
-        if ($radix !== null && $radix !== 0 && $radix !== 10) {
-            $r = (int) $radix;
+        // JS: radix = ToInt32(radix); 0 (also NaN/undefined) means "auto", i.e. 10 or 16 for 0x.
+        $r = $radix === null ? 0 : self::toInt32($radix);
+        if ($r !== 0 && $r !== 10) {
             if ($r < 2 || $r > 36) {
                 return NAN;
             }
@@ -724,24 +841,97 @@ final class Ops
         if (str_starts_with($s, '0x') || str_starts_with($s, '0X')) {
             return intval($s, 16);
         }
-        if (!is_numeric($s)) {
-            if (preg_match('/^([+-]?\d+)/', $s, $m)) {
-                return (int) $m[1];
-            }
+        // Leading decimal digits only ("1e3" → 1, "1.9" → 1), like JS. Digit runs too long
+        // for an int become a float instead of an (int) cast that PHP 8.5 warns about.
+        if (!preg_match('/^([+-]?)(\d+)/', $s, $m)) {
             return NAN;
         }
-        return (int) $s;
+        $digits = ltrim($m[2], '0');
+        if (strlen($digits) > 18) {
+            return (float) ($m[1] . $digits);
+        }
+        return (int) ($m[1] . ($digits === '' ? '0' : $digits));
     }
 
     /**
-     * JS Number.prototype.toPrecision(digits).
+     * JS Number.prototype.toFixed(digits).
      */
-    public static function toPrecision(float $n, int $digits): string
+    public static function toFixed(mixed $n, mixed $digits = null): string
     {
-        if ($digits <= 0) {
-            return (string) $n;
+        $d = $digits === null ? 0 : self::toInteger($digits);
+        if ($d < 0 || $d > 100) {
+            self::rangeError('toFixed() digits argument must be between 0 and 100');
         }
-        return rtrim(rtrim(sprintf("%.{$digits}g", $n), '0'), '.');
+        $x = (float) self::toNumber($n);
+        if (!is_finite($x) || abs($x) >= 1e21) {
+            return self::numberToString($x);
+        }
+        if ($d > 52) {
+            return number_format($x, $d, '.', ''); // beyond sprintf()'s precision limit
+        }
+
+        // sprintf() is exactly rounded but breaks exact ties to even (12.5 -> "12"); JS picks the
+        // larger magnitude (12.5 -> "13"). x is an exact tie at $d digits iff x = m * 2^e with odd m
+        // and e === -($d + 1); m and e come straight from the IEEE 754 bits.
+        if ($x == 0.0) {
+            $x = 0.0; // -0 prints as "0"
+        }
+        $neg = $x < 0;
+        $ax = abs($x);
+        $bits = unpack('J', pack('E', $ax))[1];
+        $expBits = ($bits >> 52) & 0x7FF;
+        $m = $bits & 0xFFFFFFFFFFFFF;
+        $e = -1074;
+        if ($expBits !== 0) {
+            $m |= 1 << 52;
+            $e = $expBits - 1075;
+        }
+        $tie = false;
+        if ($m !== 0) {
+            while (($m & 1) === 0) {
+                $m >>= 1;
+                $e++;
+            }
+            $tie = $e === -($d + 1);
+        }
+
+        if (!$tie) {
+            return ($neg ? '-' : '') . sprintf("%.{$d}F", $ax);
+        }
+
+        // Exact tie: with $d + 1 decimals the digits are exact and end in '5'; drop it, round up.
+        $s = substr(sprintf('%.' . ($d + 1) . 'F', $ax), 0, $d === 0 ? -2 : -1);
+        for ($i = strlen($s) - 1; $i >= 0; $i--) {
+            if ($s[$i] === '.') {
+                continue;
+            }
+            if ($s[$i] === '9') {
+                $s[$i] = '0';
+                continue;
+            }
+            $s[$i] = chr(ord($s[$i]) + 1);
+            break;
+        }
+        if ($i < 0) {
+            $s = '1' . $s;
+        }
+        return ($neg ? '-' : '') . $s;
+    }
+
+    /**
+     * JS Number.prototype.toPrecision(digits); null digits means undefined (plain ToString).
+     */
+    public static function toPrecision(mixed $n, mixed $digits = null): string
+    {
+        $x = is_int($n) || is_float($n) ? $n : self::toNumber($n);
+        if ($digits === null || (is_float($x) && !is_finite($x))) {
+            return self::numberToString($x);
+        }
+        $p = self::toInteger($digits);
+        if ($p < 1 || $p > 100) {
+            self::rangeError('toPrecision() argument must be between 1 and 100');
+        }
+        return rtrim(rtrim(sprintf("%.{$p}g", (float) $x), '0'), '.');
     }
 
     /**
@@ -749,10 +939,167 @@ final class Ops
      */
     public static function toExponential(float $n, mixed $digits = null): string
     {
-        $d = $digits === null ? 6 : (int) $digits;
+        $d = $digits === null ? 6 : self::toInteger($digits);
+        if (!is_finite($n)) {
+            return self::numberToString($n);
+        }
+        if ($d < 0 || $d > 100) {
+            self::rangeError('toExponential() argument must be between 0 and 100');
+        }
         $s = sprintf("%.{$d}e", $n);
         // PHP uses e+01 format, JS uses e+1 — normalize
         return preg_replace('/e([+-])0*(\d)/', 'e$1$2', $s);
+    }
+
+    /**
+     * JS Number.prototype.toString(radix) for an explicit radix.
+     */
+    public static function numberToRadix(mixed $n, mixed $radix): string
+    {
+        $r = self::toInteger($radix);
+        if ($r < 2 || $r > 36) {
+            self::rangeError('toString() radix must be between 2 and 36');
+        }
+        $x = is_int($n) || is_float($n) ? $n : self::toNumber($n);
+        if (is_float($x)) {
+            if (!is_finite($x)) {
+                return self::numberToString($x);
+            }
+            // Integer part only (fractional digits in other bases are not supported).
+            $x = $x > -9.2233720368547758E18 && $x < 9.2233720368547758E18
+                ? (int) $x
+                : sprintf('%.0f', $x);
+        }
+        if (is_int($x)) {
+            if ($r === 10) {
+                return (string) $x;
+            }
+            return ($x < 0 ? '-' : '') . base_convert((string) abs($x), 10, $r);
+        }
+        return ($x[0] === '-' ? '-' : '') . base_convert(ltrim($x, '-'), 10, $r);
+    }
+
+    /** Longest string the string builders may produce (V8's limit), instead of exhausting memory. */
+    private const MAX_STRING_LENGTH = 536870888;
+
+    /**
+     * JS String.prototype.repeat(count).
+     */
+    public static function strRepeat(string $s, mixed $count): string
+    {
+        $n = self::toInteger($count);
+        if ($n < 0 || $n >= 9007199254740992) {
+            self::rangeError('Invalid count value: ' . self::toString($count));
+        }
+        if ($n === 0 || $s === '') {
+            return '';
+        }
+        if ($n > intdiv(self::MAX_STRING_LENGTH, strlen($s))) {
+            self::rangeError('Invalid string length');
+        }
+        return str_repeat($s, $n);
+    }
+
+    /**
+     * Target length for padStart()/padEnd(): ToIntegerOrInfinity, bounded like a JS engine.
+     */
+    public static function padLength(mixed $length): int
+    {
+        $n = self::toInteger($length);
+        if ($n > self::MAX_STRING_LENGTH) {
+            self::rangeError('Invalid string length');
+        }
+        return $n;
+    }
+
+    /**
+     * Result of Math.floor/ceil/round/trunc: an int when it fits, else the float (NaN, ±Infinity, huge).
+     */
+    public static function integral(int|float $n): int|float
+    {
+        if (is_float($n) && $n > -9007199254740992.0 && $n < 9007199254740992.0) {
+            return (int) $n;
+        }
+        return $n;
+    }
+
+    /**
+     * JS Math.trunc().
+     */
+    public static function mathTrunc(mixed $n): int|float
+    {
+        $x = is_int($n) || is_float($n) ? $n : self::toNumber($n);
+        if (is_int($x)) {
+            return $x;
+        }
+        return self::integral($x < 0 ? ceil($x) : floor($x));
+    }
+
+    /**
+     * JS Math.clz32().
+     */
+    public static function clz32(mixed $n): int
+    {
+        $u = self::toUint32($n);
+        if ($u === 0) {
+            return 32;
+        }
+        $count = 0;
+        while (($u & 0x80000000) === 0) {
+            $u <<= 1;
+            $count++;
+        }
+        return $count;
+    }
+
+    /**
+     * JS Array.prototype.join(separator): null/undefined elements become '', everything else ToString.
+     */
+    public static function join(mixed $arr, mixed $separator = null): string
+    {
+        $sep = $separator === null ? ',' : self::toString($separator);
+        $parts = [];
+        foreach (is_array($arr) ? $arr : [] as $v) {
+            $parts[] = $v === null ? '' : self::toString($v);
+        }
+        return implode($sep, $parts);
+    }
+
+    /**
+     * JS Array.prototype.slice(start, end) for PHP lists.
+     */
+    public static function arraySlice(array $arr, mixed $start = null, mixed $end = null): array
+    {
+        $len = count($arr);
+        $s = self::toInteger($start);
+        $s = $s < 0 ? max(0, $len + $s) : min($s, $len);
+        $e = $end === null ? $len : self::toInteger($end);
+        $e = $e < 0 ? max(0, $len + $e) : min($e, $len);
+        return $e > $s ? array_slice($arr, $s, $e - $s) : [];
+    }
+
+    /**
+     * JS Array.prototype.fill(value, start, end) — fills in place within the current length.
+     */
+    public static function arrayFill(array &$arr, mixed $value = null, mixed $start = null, mixed $end = null): array
+    {
+        $len = count($arr);
+        $s = self::toInteger($start);
+        $s = $s < 0 ? max(0, $len + $s) : min($s, $len);
+        $e = $end === null ? $len : self::toInteger($end);
+        $e = $e < 0 ? max(0, $len + $e) : min($e, $len);
+        for ($i = $s; $i < $e; $i++) {
+            $arr[$i] = $value;
+        }
+        return $arr;
+    }
+
+    /**
+     * arrayFill() for temporaries that cannot be passed by reference.
+     */
+    public static function arrayFilled(array $arr, mixed $value = null, mixed $start = null, mixed $end = null): array
+    {
+        return self::arrayFill($arr, $value, $start, $end);
     }
 
     /**
@@ -837,7 +1184,26 @@ final class Ops
         return self::toString($value);
     }
 
-    private static function toPropertyKey(mixed $key): string
+    /**
+     * Normalize a computed key for direct PHP array/ArrayAccess indexing.
+     *
+     * Ints and strings pass through untouched (hot path). Everything else uses
+     * the JS property key, so 1.0 → 1, NaN → "NaN" and 1.5 → "1.5" instead of
+     * PHP's implicit float→int truncation (which warns for NaN/Infinity on 8.5).
+     */
+    public static function arrayKey(mixed $key): int|string
+    {
+        if (is_int($key) || is_string($key)) {
+            return $key;
+        }
+        if (is_float($key) && $key == floor($key) && $key > -9007199254740992.0 && $key < 9007199254740992.0) {
+            return (int) $key;
+        }
+
+        return self::toString($key);
+    }
+
+    public static function toPropertyKey(mixed $key): string
     {
         if (is_int($key) || is_string($key)) {
             return (string) $key;
@@ -848,6 +1214,10 @@ final class Ops
 
     private static function jsonNormalize(mixed $value): mixed
     {
+        if (is_float($value) && !is_finite($value)) {
+            return null; // JSON has no NaN/Infinity: JSON.stringify() writes null
+        }
+
         if ($value instanceof JSObject) {
             $normalized = [];
             foreach ($value->properties as $key => $item) {

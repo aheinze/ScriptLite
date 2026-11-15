@@ -126,6 +126,50 @@ double sl_to_double(sl_value v) {
     return sl_to_number(v);
 }
 
+/* ---- JS numeric conversions ---- */
+
+static inline int32_t sl_u32_to_i32(uint32_t u) {
+    return u <= (uint32_t)INT32_MAX ? (int32_t)u : (int32_t)((int64_t)u - 4294967296LL);
+}
+
+int32_t sl_double_to_int32(double d) {
+    if (!isfinite(d)) return 0;
+    if (d > -2147483649.0 && d < 2147483648.0) return (int32_t)d; /* truncates, in range */
+    /* Integral doubles are exact under fmod, so this is the true modulo 2^32. */
+    d = fmod(trunc(d), 4294967296.0);
+    if (d < 0) d += 4294967296.0;
+    return sl_u32_to_i32((uint32_t)d);
+}
+
+int32_t sl_to_int32(sl_value v) {
+    if (v.tag == SL_TAG_INT) {
+        /* unsigned conversion is defined modulo 2^64, so the low 32 bits are exact */
+        return sl_u32_to_i32((uint32_t)(uint64_t)v.u.ival);
+    }
+    return sl_double_to_int32(sl_to_number(v));
+}
+
+uint32_t sl_to_uint32(sl_value v) {
+    return (uint32_t)sl_to_int32(v);
+}
+
+zend_long sl_double_to_integer(double d) {
+    if (isnan(d)) return 0;
+    if (d >= (double)SL_INTEGER_CLAMP) return SL_INTEGER_CLAMP;
+    if (d <= -(double)SL_INTEGER_CLAMP) return -SL_INTEGER_CLAMP;
+    return (zend_long)d; /* truncates toward zero, in range */
+}
+
+zend_long sl_to_integer(sl_value v) {
+    if (v.tag == SL_TAG_INT) return v.u.ival;
+    return sl_double_to_integer(sl_to_number(v));
+}
+
+bool sl_double_fits_long(double d) {
+    /* 2^63 itself is not representable; the comparisons are false for NaN */
+    return d >= -9223372036854775808.0 && d < 9223372036854775808.0 && d == trunc(d);
+}
+
 /* ---- JS ToString ---- */
 
 zend_string *sl_to_js_string(sl_value v) {
@@ -177,8 +221,11 @@ zend_string *sl_to_js_string(sl_value v) {
             return zend_string_init("function", 8, 0);
         case SL_TAG_DATE: {
             /* ISO string representation */
-            time_t secs = (time_t)(v.u.date->timestamp / 1000.0);
+            double ts = v.u.date->timestamp;
+            if (!isfinite(ts)) return zend_string_init("Invalid Date", 12, 0);
+            time_t secs = (time_t)(ts / 1000.0);
             struct tm *tm = gmtime(&secs);
+            if (!tm) return zend_string_init("Invalid Date", 12, 0);
             char buf[64];
             int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
                 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
@@ -388,7 +435,7 @@ void sl_value_to_zval(sl_value *v, zval *zv) {
             break;
         case SL_TAG_DOUBLE:
             /* Convert float to int if it's an integer value (matches PHP VM toPhp behavior) */
-            if (v->u.dval == (double)(zend_long)v->u.dval && !isinf(v->u.dval) && !isnan(v->u.dval)) {
+            if (sl_double_fits_long(v->u.dval)) {
                 ZVAL_LONG(zv, (zend_long)v->u.dval);
             } else {
                 ZVAL_DOUBLE(zv, v->u.dval);

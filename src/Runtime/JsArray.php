@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace ScriptLite\Runtime;
 
+use ScriptLite\Transpiler\Runtime\Ops;
+use ScriptLite\Vm\VirtualMachine;
+
 /**
  * Runtime representation of a JavaScript array.
  *
@@ -63,7 +66,7 @@ final class JsArray
             return $this->properties[$key];
         }
 
-        $idx = $this->toIndex($key);
+        $idx = self::toIndex($key);
         if ($idx !== null && $idx >= 0 && $idx < count($this->elements)) {
             return $this->elements[$idx];
         }
@@ -76,7 +79,7 @@ final class JsArray
      */
     public function set(mixed $key, mixed $value): void
     {
-        $idx = $this->toIndex($key);
+        $idx = self::toIndex($key);
         if ($idx === null || $idx < 0) {
             return;
         }
@@ -119,13 +122,13 @@ final class JsArray
             'splice' => new NativeFunction('splice', function (mixed $start = 0, mixed $deleteCount = null) {
                 $rest = array_slice(func_get_args(), 2);
                 $len = count($this->elements);
-                $s = (int) $start;
+                $s = Ops::toInteger($start);
                 if ($s < 0) {
                     $s = max(0, $len + $s);
                 }
                 $dc = $deleteCount === null || $deleteCount === JsUndefined::Value
                     ? $len - $s
-                    : max(0, (int) $deleteCount);
+                    : max(0, Ops::toInteger($deleteCount));
                 $removed = array_splice($this->elements, $s, $dc, $rest);
                 return new self($removed);
             }),
@@ -135,19 +138,19 @@ final class JsArray
             }),
             'sort' => new NativeFunction('sort', function (mixed $compareFn = null) use ($invoker) {
                 if ($compareFn === null || $compareFn === JsUndefined::Value) {
-                    usort($this->elements, fn($a, $b) => strcmp((string) $a, (string) $b));
+                    usort($this->elements, fn($a, $b) => strcmp(VirtualMachine::toJsString($a), VirtualMachine::toJsString($b)));
                 } elseif ($invoker !== null) {
-                    usort($this->elements, fn($a, $b) => (int) $invoker($compareFn, [$a, $b]));
+                    usort($this->elements, fn($a, $b) => Ops::compareResult($invoker($compareFn, [$a, $b])));
                 }
                 return $this;
             }),
             'fill' => new NativeFunction('fill', function (mixed $value, mixed $start = 0, mixed $end = null) {
                 $len = count($this->elements);
-                $s = (int) $start;
+                $s = Ops::toInteger($start);
                 if ($s < 0) {
                     $s = max(0, $len + $s);
                 }
-                $e = $end === null || $end === JsUndefined::Value ? $len : (int) $end;
+                $e = $end === null || $end === JsUndefined::Value ? $len : Ops::toInteger($end);
                 if ($e < 0) {
                     $e = max(0, $len + $e);
                 }
@@ -164,7 +167,7 @@ final class JsArray
                     if ($el === null || $el === JsUndefined::Value) {
                         $parts[] = '';
                     } else {
-                        $parts[] = (string) $el;
+                        $parts[] = VirtualMachine::toJsString($el);
                     }
                 }
                 return implode(is_string($separator) ? $separator : ',', $parts);
@@ -187,11 +190,11 @@ final class JsArray
             }),
             'slice' => new NativeFunction('slice', function (mixed $start = 0, mixed $end = null) {
                 $len = count($this->elements);
-                $s = (int) $start;
+                $s = Ops::toInteger($start);
                 if ($s < 0) {
                     $s = max(0, $len + $s);
                 }
-                $e = $end === null || $end === JsUndefined::Value ? $len : (int) $end;
+                $e = $end === null || $end === JsUndefined::Value ? $len : Ops::toInteger($end);
                 if ($e < 0) {
                     $e = max(0, $len + $e);
                 }
@@ -209,7 +212,7 @@ final class JsArray
                 return new self($result);
             }),
             'flat' => new NativeFunction('flat', function (mixed $depth = 1) {
-                return new self($this->flattenElements($this->elements, (int) $depth));
+                return new self($this->flattenElements($this->elements, Ops::toInteger($depth)));
             }),
 
             // ── Callback-based (require VM invoker for re-entrant execution) ──
@@ -328,7 +331,7 @@ final class JsArray
                 return new JsArray($result);
             }) : null,
             'at' => new NativeFunction('at', function (mixed $index = 0) {
-                $i = (int) $index;
+                $i = Ops::toInteger($index);
                 if ($i < 0) {
                     $i += count($this->elements);
                 }
@@ -339,13 +342,22 @@ final class JsArray
         };
     }
 
+    /**
+     * flat(Infinity) on a cyclic array (a.push(a)) would recurse forever; JS engines end with a
+     * stack-overflow RangeError, so cap the nesting (same limit as the C extension).
+     */
+    private const FLAT_MAX_NESTING = 1024;
+
     /** @return mixed[] */
-    private function flattenElements(array $elements, int $depth): array
+    private function flattenElements(array $elements, int $depth, int $nesting = 0): array
     {
         $result = [];
         foreach ($elements as $el) {
             if ($el instanceof self && $depth > 0) {
-                $result = array_merge($result, $this->flattenElements($el->elements, $depth - 1));
+                if ($nesting >= self::FLAT_MAX_NESTING) {
+                    Ops::rangeError('Maximum call stack size exceeded');
+                }
+                $result = array_merge($result, $this->flattenElements($el->elements, $depth - 1, $nesting + 1));
             } else {
                 $result[] = $el;
             }
@@ -353,15 +365,25 @@ final class JsArray
         return $result;
     }
 
-    private function toIndex(mixed $key): ?int
+    /**
+     * Array index for a property key, or null when the key is not an integer index
+     * (NaN, ±Infinity, fractions and huge floats are plain property names in JS).
+     */
+    public static function toIndex(mixed $key): ?int
     {
         if (is_int($key)) {
             return $key;
         }
-        if (is_float($key) && $key == (int) $key) {
-            return (int) $key;
+        if (is_string($key)) {
+            if (!is_numeric($key)) {
+                return null;
+            }
+            $key = +$key;
+            if (is_int($key)) {
+                return $key;
+            }
         }
-        if (is_string($key) && is_numeric($key)) {
+        if (is_float($key) && $key == floor($key) && $key > -9007199254740992.0 && $key < 9007199254740992.0) {
             return (int) $key;
         }
         return null;

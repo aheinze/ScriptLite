@@ -291,7 +291,12 @@ final class Lexer
             if ($this->pos + 1 < $this->len) {
                 $this->advance(); // skip '}'
             }
-            return mb_chr((int) hexdec($hex), 'UTF-8');
+            // hexdec() returns a float for long digit runs; never (int)-cast that (PHP 8.5 warns)
+            $cp = hexdec($hex);
+            if (!is_int($cp) || $cp > 0x10FFFF) {
+                throw new LexerException('Undefined Unicode code-point', $this->line, $this->col);
+            }
+            return mb_chr($cp, 'UTF-8');
         }
         // \uXXXX — exactly 4 hex digits
         $hex = '';

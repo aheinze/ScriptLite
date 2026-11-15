@@ -99,6 +99,21 @@ bool sl_loose_equal(sl_value a, sl_value b);
 bool sl_strict_equal(sl_value a, sl_value b);
 double sl_to_double(sl_value v);
 
+/* ---- JS numeric conversions ----
+ * Converting a NaN, infinite or out-of-range double to an integer type is undefined
+ * behaviour in C (x86 yields INT_MIN), so every double -> integer conversion of a
+ * script value must go through these helpers. They match the PHP backends
+ * (ScriptLite\Transpiler\Runtime\Ops::toInt32/toUint32/toInteger). */
+#define SL_INTEGER_CLAMP      9007199254740992LL  /* 2^53: past any real string/array length */
+#define SL_MAX_STRING_LENGTH  536870888           /* longest string builders may produce (V8's limit) */
+
+int32_t   sl_double_to_int32(double d);     /* JS ToInt32 */
+int32_t   sl_to_int32(sl_value v);
+uint32_t  sl_to_uint32(sl_value v);          /* JS ToUint32 */
+zend_long sl_double_to_integer(double d);   /* JS ToIntegerOrInfinity, NaN -> 0, clamped to +-2^53 */
+zend_long sl_to_integer(sl_value v);
+bool      sl_double_fits_long(double d);    /* finite, integral and representable as zend_long */
+
 /* ---- PHP ↔ JS conversion ---- */
 sl_value sl_zval_to_value(zval *zv);
 void sl_value_to_zval(sl_value *v, zval *zv);

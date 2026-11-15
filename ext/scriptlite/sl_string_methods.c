@@ -58,18 +58,16 @@ static size_t sl_utf8_offset(const char *s, size_t byte_len, size_t char_index) 
         else                i += 4;
         count++;
     }
-    return i;
+    return i < byte_len ? i : byte_len; /* a truncated sequence at the end must not overshoot */
 }
 
 /* Get the byte length of one UTF-8 character at position */
 static size_t sl_utf8_char_len(const char *s, size_t byte_len, size_t byte_offset) {
     if (byte_offset >= byte_len) return 0;
     unsigned char c = (unsigned char)s[byte_offset];
-    if (c < 0x80) return 1;
-    if (c < 0xC0) return 1;
-    if (c < 0xE0) return 2;
-    if (c < 0xF0) return 3;
-    return 4;
+    size_t n = (c < 0xC0) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+    size_t remaining = byte_len - byte_offset;
+    return n <= remaining ? n : remaining; /* truncated sequence: stay inside the string */
 }
 
 /* Get UTF-8 codepoint at byte offset */
@@ -139,7 +137,7 @@ static zend_long sl_byte_to_char_index(const char *s, size_t byte_len, size_t by
 
 static sl_value sl_str_charAt(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long idx = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long idx = argc > 1 ? sl_to_integer(args[1]) : 0;
     size_t char_count = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
     if (idx < 0 || (size_t)idx >= char_count) {
@@ -153,7 +151,7 @@ static sl_value sl_str_charAt(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_str_charCodeAt(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long idx = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long idx = argc > 1 ? sl_to_integer(args[1]) : 0;
     size_t char_count = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
     if (idx < 0 || (size_t)idx >= char_count) {
@@ -170,7 +168,7 @@ static sl_value sl_str_indexOf(sl_vm *vm, sl_value *args, int argc) {
     if (argc < 2) return sl_val_int(-1);
 
     zend_string *search = sl_to_js_string(args[1]);
-    zend_long from_char = argc > 2 ? (zend_long)sl_to_number(args[2]) : 0;
+    zend_long from_char = argc > 2 ? sl_to_integer(args[2]) : 0;
     if (from_char < 0) from_char = 0;
 
     size_t from_byte = sl_utf8_offset(ZSTR_VAL(str), ZSTR_LEN(str), (size_t)from_char);
@@ -200,7 +198,7 @@ static sl_value sl_str_includes(sl_vm *vm, sl_value *args, int argc) {
     if (argc < 2) return sl_val_bool(0);
 
     zend_string *search = sl_to_js_string(args[1]);
-    zend_long from_char = argc > 2 ? (zend_long)sl_to_number(args[2]) : 0;
+    zend_long from_char = argc > 2 ? sl_to_integer(args[2]) : 0;
     if (from_char < 0) from_char = 0;
 
     size_t from_byte = sl_utf8_offset(ZSTR_VAL(str), ZSTR_LEN(str), (size_t)from_char);
@@ -215,7 +213,7 @@ static sl_value sl_str_startsWith(sl_vm *vm, sl_value *args, int argc) {
     if (argc < 2) return sl_val_bool(0);
 
     zend_string *prefix = sl_to_js_string(args[1]);
-    zend_long pos_char = argc > 2 ? (zend_long)sl_to_number(args[2]) : 0;
+    zend_long pos_char = argc > 2 ? sl_to_integer(args[2]) : 0;
     if (pos_char < 0) pos_char = 0;
 
     size_t pos_byte = sl_utf8_offset(ZSTR_VAL(str), ZSTR_LEN(str), (size_t)pos_char);
@@ -235,7 +233,8 @@ static sl_value sl_str_endsWith(sl_vm *vm, sl_value *args, int argc) {
     size_t end_byte;
 
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
-        zend_long end_char = (zend_long)sl_to_number(args[2]);
+        zend_long end_char = sl_to_integer(args[2]);
+        if (end_char < 0) end_char = 0;
         end_byte = sl_utf8_offset(ZSTR_VAL(str), ZSTR_LEN(str), (size_t)end_char);
     } else {
         end_byte = ZSTR_LEN(str);
@@ -252,14 +251,14 @@ static sl_value sl_str_slice(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
     size_t char_len = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
-    zend_long s = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long s = argc > 1 ? sl_to_integer(args[1]) : 0;
     if (s < 0) s = (zend_long)char_len + s;
     if (s < 0) s = 0;
     if ((size_t)s > char_len) s = (zend_long)char_len;
 
     zend_long e;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
-        e = (zend_long)sl_to_number(args[2]);
+        e = sl_to_integer(args[2]);
         if (e < 0) e = (zend_long)char_len + e;
         if (e < 0) e = 0;
         if ((size_t)e > char_len) e = (zend_long)char_len;
@@ -278,13 +277,13 @@ static sl_value sl_str_substring(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
     size_t char_len = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
-    zend_long s = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long s = argc > 1 ? sl_to_integer(args[1]) : 0;
     if (s < 0) s = 0;
     if ((size_t)s > char_len) s = (zend_long)char_len;
 
     zend_long e;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
-        e = (zend_long)sl_to_number(args[2]);
+        e = sl_to_integer(args[2]);
         if (e < 0) e = 0;
         if ((size_t)e > char_len) e = (zend_long)char_len;
     } else {
@@ -350,9 +349,17 @@ static sl_value sl_str_trimEnd(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_str_repeat(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long n = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
-    if (n <= 0 || ZSTR_LEN(str) == 0) {
+    zend_long n = argc > 1 ? sl_to_integer(args[1]) : 0;
+    if (n < 0 || n >= SL_INTEGER_CLAMP) {
+        sl_vm_throw_type_error(vm, "RangeError: Invalid count value");
+        return sl_val_undefined();
+    }
+    if (n == 0 || ZSTR_LEN(str) == 0) {
         return sl_val_string(zend_string_init("", 0, 0));
+    }
+    if ((size_t)n > SL_MAX_STRING_LENGTH / ZSTR_LEN(str)) {
+        sl_vm_throw_type_error(vm, "RangeError: Invalid string length");
+        return sl_val_undefined();
     }
     size_t result_len = ZSTR_LEN(str) * (size_t)n;
     zend_string *result = zend_string_alloc(result_len, 0);
@@ -375,7 +382,7 @@ static sl_value sl_str_split(sl_vm *vm, sl_value *args, int argc) {
 
     zend_long limit = -1;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
-        limit = (zend_long)sl_to_number(args[2]);
+        limit = (zend_long)sl_to_uint32(args[2]);
     }
 
     /* Regex separator */
@@ -823,10 +830,14 @@ static sl_value sl_str_search(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_str_padStart(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long target = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long target = argc > 1 ? sl_to_integer(args[1]) : 0;
     size_t char_len = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
-    if ((size_t)target <= char_len) return sl_val_string(zend_string_copy(str));
+    if (target <= (zend_long)char_len) return sl_val_string(zend_string_copy(str));
+    if (target > SL_MAX_STRING_LENGTH) {
+        sl_vm_throw_type_error(vm, "RangeError: Invalid string length");
+        return sl_val_undefined();
+    }
 
     zend_string *pad;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
@@ -866,10 +877,14 @@ static sl_value sl_str_padStart(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_str_padEnd(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long target = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long target = argc > 1 ? sl_to_integer(args[1]) : 0;
     size_t char_len = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
-    if ((size_t)target <= char_len) return sl_val_string(zend_string_copy(str));
+    if (target <= (zend_long)char_len) return sl_val_string(zend_string_copy(str));
+    if (target > SL_MAX_STRING_LENGTH) {
+        sl_vm_throw_type_error(vm, "RangeError: Invalid string length");
+        return sl_val_undefined();
+    }
 
     zend_string *pad;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
@@ -908,7 +923,7 @@ static sl_value sl_str_padEnd(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_str_at(sl_vm *vm, sl_value *args, int argc) {
     zend_string *str = args[0].u.str;
-    zend_long idx = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long idx = argc > 1 ? sl_to_integer(args[1]) : 0;
     size_t char_len = sl_utf8_strlen(ZSTR_VAL(str), ZSTR_LEN(str));
 
     if (idx < 0) idx += (zend_long)char_len;
@@ -1014,7 +1029,8 @@ sl_value sl_string_get_property(zend_string *str, sl_value key) {
     zend_long idx = -1;
     if (key.tag == SL_TAG_INT) {
         idx = key.u.ival;
-    } else if (key.tag == SL_TAG_DOUBLE && key.u.dval == (double)(zend_long)key.u.dval) {
+    } else if (key.tag == SL_TAG_DOUBLE && key.u.dval >= 0 && key.u.dval < (double)SL_INTEGER_CLAMP
+               && key.u.dval == trunc(key.u.dval)) {
         idx = (zend_long)key.u.dval;
     } else if (key.tag == SL_TAG_STRING) {
         zend_ulong tmp;

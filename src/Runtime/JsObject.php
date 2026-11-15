@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ScriptLite\Runtime;
 
+use ScriptLite\Vm\VirtualMachine;
+
 /**
  * Runtime representation of a JavaScript plain object.
  *
@@ -39,7 +41,7 @@ final class JsObject
      */
     public function get(mixed $key, ?\Closure $invoker = null): mixed
     {
-        $k = (string) $key;
+        $k = is_string($key) ? $key : VirtualMachine::propertyKey($key);
 
         // Method lookup — cached
         if (isset($this->methodCache[$k])) {
@@ -68,14 +70,14 @@ final class JsObject
      */
     public function set(mixed $key, mixed $value): void
     {
-        $this->properties[(string) $key] = $value;
+        $this->properties[is_string($key) ? $key : VirtualMachine::propertyKey($key)] = $value;
     }
 
     private function buildMethod(string $name): ?NativeFunction
     {
         return match ($name) {
             'hasOwnProperty' => new NativeFunction('hasOwnProperty', function (mixed $key) {
-                return array_key_exists((string) $key, $this->properties);
+                return array_key_exists(VirtualMachine::propertyKey($key), $this->properties);
             }),
             default => null,
         };

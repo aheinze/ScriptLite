@@ -1724,8 +1724,7 @@ void sl_compile_expr(sl_compiler *c, zval *expr) {
     if (sl_ast_is(expr, cc->ce_number_literal)) {
         double val = sl_ast_prop_double(expr, SL_G(str_value));
         /* Store as int if it's an integer value */
-        if (val == (double)(zend_long)val && !isinf(val) && !isnan(val)
-            && val >= (double)ZEND_LONG_MIN && val <= (double)ZEND_LONG_MAX) {
+        if (sl_double_fits_long(val)) { /* range check before the cast (out-of-range casts are UB) */
             sl_emit_const(c, sl_val_int((zend_long)val));
         } else {
             sl_emit_const(c, sl_val_double(val));

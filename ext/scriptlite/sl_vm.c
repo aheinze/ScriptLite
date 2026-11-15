@@ -123,6 +123,13 @@ void sl_vm_push_frame(sl_vm *vm, sl_func_descriptor *desc, sl_environment *env,
         }
         vm->frame_capacity *= 2;
         vm->frames = safe_erealloc(vm->frames, vm->frame_capacity, sizeof(sl_call_frame), 0);
+        /* Inline register files live inside the frame struct; after the move their
+         * registers pointers still referenced the freed array (use-after-free). */
+        for (uint32_t i = 0; i < vm->frame_count; i++) {
+            if (vm->frames[i].using_inline_registers) {
+                vm->frames[i].registers = vm->frames[i].inline_registers;
+            }
+        }
     }
 
     sl_call_frame *f = &vm->frames[vm->frame_count];
@@ -733,6 +740,7 @@ static zend_always_inline zval *sl_env_lookup_with_depth(
 
 /* Sync local state back to VM/frame before a call or throw. */
 #define SYNC_STATE() do {                                  \
+    frame = &vm->frames[frame_idx]; /* a call may have moved vm->frames */ \
     vm->sp = sp;                                           \
     frame->ip = ip;                                        \
     if (frame->env != env) {                               \
@@ -745,7 +753,8 @@ static zend_always_inline zval *sl_env_lookup_with_depth(
 
 /* Reload local state from VM/frame after a call or exception. */
 #define RELOAD_STATE() do {                                \
-    frame = &vm->frames[vm->frame_count - 1];              \
+    frame_idx = vm->frame_count - 1;                       \
+    frame = &vm->frames[frame_idx];                        \
     desc  = frame->desc;                                   \
     ops   = desc->ops;                                     \
     opA   = desc->opA;                                     \
@@ -865,6 +874,7 @@ static sl_value sl_vm_run(sl_vm *vm) {
 
     /* ---- Localize hot variables ---- */
     sl_call_frame *frame;
+    uint32_t       frame_idx;
     sl_func_descriptor *desc;
     uint8_t       *ops;
     int32_t       *opA;
@@ -1140,8 +1150,8 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_BIT_AND): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b);
+        int32_t ia = sl_to_int32(a);
+        int32_t ib = sl_to_int32(b);
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
         stack[sp - 1] = sl_val_int(ia & ib);
@@ -1151,8 +1161,8 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_BIT_OR): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b);
+        int32_t ia = sl_to_int32(a);
+        int32_t ib = sl_to_int32(b);
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
         stack[sp - 1] = sl_val_int(ia | ib);
@@ -1162,8 +1172,8 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_BIT_XOR): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b);
+        int32_t ia = sl_to_int32(a);
+        int32_t ib = sl_to_int32(b);
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
         stack[sp - 1] = sl_val_int(ia ^ ib);
@@ -1172,7 +1182,7 @@ static sl_value sl_vm_run(sl_vm *vm) {
 
     TARGET(SL_OP_BIT_NOT): {
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
+        int32_t ia = sl_to_int32(a);
         SL_DELREF(stack[sp - 1]);
         stack[sp - 1] = sl_val_int(~ia);
         DISPATCH();
@@ -1181,19 +1191,21 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_SHL): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b) & 0x1F;
+        /* shift as unsigned (a signed left shift of a negative value is UB in C), then back to int32 */
+        uint32_t ua = sl_to_uint32(a);
+        uint32_t ib = sl_to_uint32(b) & 0x1F;
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
-        stack[sp - 1] = sl_val_int(ia << ib);
+        uint32_t ur = ua << ib;
+        stack[sp - 1] = sl_val_int(ur <= (uint32_t)INT32_MAX ? (zend_long)ur : (zend_long)ur - 4294967296LL);
         DISPATCH();
     }
 
     TARGET(SL_OP_SHR): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        int32_t ia = (int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b) & 0x1F;
+        int32_t ia = sl_to_int32(a);
+        uint32_t ib = sl_to_uint32(b) & 0x1F;
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
         stack[sp - 1] = sl_val_int(ia >> ib);
@@ -1203,8 +1215,8 @@ static sl_value sl_vm_run(sl_vm *vm) {
     TARGET(SL_OP_USHR): {
         sl_value b = stack[--sp];
         sl_value a = stack[sp - 1];
-        uint32_t ua = (uint32_t)(int32_t)sl_to_number(a);
-        int32_t ib = (int32_t)sl_to_number(b) & 0x1F;
+        uint32_t ua = sl_to_uint32(a);
+        uint32_t ib = sl_to_uint32(b) & 0x1F;
         SL_DELREF(stack[sp - 1]);
         SL_DELREF(b);
         stack[sp - 1] = sl_val_int((zend_long)(ua >> ib));
@@ -1633,6 +1645,9 @@ static sl_value sl_vm_run(sl_vm *vm) {
             if (key.tag == SL_TAG_INT) {
                 zend_long idx = key.u.ival;
                 result = (idx >= 0 && (uint32_t)idx < obj.u.arr->length);
+            } else if (key.tag == SL_TAG_DOUBLE) {
+                double d = key.u.dval;
+                result = d >= 0 && d < (double)obj.u.arr->length && d == trunc(d);
             } else if (key.tag == SL_TAG_STRING) {
                 zend_ulong idx;
                 if (ZEND_HANDLE_NUMERIC(key.u.str, idx)) {
@@ -1667,8 +1682,10 @@ static sl_value sl_vm_run(sl_vm *vm) {
             zend_string *skey = sl_to_js_string(key);
             sl_object_delete(obj.u.obj, skey);
             zend_string_release(skey);
-        } else if (obj.tag == SL_TAG_ARRAY && key.tag == SL_TAG_INT) {
-            zend_long idx = key.u.ival;
+        } else if (obj.tag == SL_TAG_ARRAY && (key.tag == SL_TAG_INT ||
+                   (key.tag == SL_TAG_DOUBLE && key.u.dval >= 0 && key.u.dval < (double)obj.u.arr->length
+                    && key.u.dval == trunc(key.u.dval)))) {
+            zend_long idx = key.tag == SL_TAG_INT ? key.u.ival : (zend_long)key.u.dval;
             if (idx >= 0 && (uint32_t)idx < obj.u.arr->length) {
                 SL_DELREF(obj.u.arr->elements[idx]);
                 obj.u.arr->elements[idx] = sl_val_undefined();
@@ -1742,8 +1759,11 @@ static sl_value sl_vm_run(sl_vm *vm) {
 
         if (vm->frame_count == 0 ||
             (vm->invoke_depth > 0 && vm->frame_count == vm->invoke_base_frame)) {
-            /* Return from callback or top-level function during re-entrant run. */
-            RELOAD_STATE();
+            /* Return from callback or top-level function during re-entrant run.
+             * A top-level `return` leaves no frame: RELOAD_STATE() would read frames[-1]. */
+            if (vm->frame_count > 0) {
+                RELOAD_STATE();
+            }
             sp = vm->sp;
             goto halt;
         }

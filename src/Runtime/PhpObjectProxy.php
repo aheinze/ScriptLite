@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ScriptLite\Runtime;
 
 use ReflectionMethod;
+use ScriptLite\Transpiler\Runtime\Ops;
 
 /**
  * Wraps a real PHP object for use inside the JS engine.
@@ -162,10 +163,11 @@ final class PhpObjectProxy implements \ArrayAccess
             }
             if ($param['builtin'] !== null) {
                 $args[$i] = match ($param['builtin']) {
-                    'int'    => (int) $args[$i],
+                    // JS numbers arrive as floats; NaN/Infinity must not hit a raw cast (PHP 8.5 warns)
+                    'int'    => is_float($args[$i]) ? Ops::toInteger($args[$i]) : (int) $args[$i],
                     'float'  => (float) $args[$i],
-                    'string' => (string) $args[$i],
-                    'bool'   => (bool) $args[$i],
+                    'string' => is_float($args[$i]) ? Ops::numberToString($args[$i]) : (string) $args[$i],
+                    'bool'   => is_float($args[$i]) ? Ops::toBoolean($args[$i]) : (bool) $args[$i],
                     'array'  => (array) $args[$i],
                     default  => $args[$i],
                 };

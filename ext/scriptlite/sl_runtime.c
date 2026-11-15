@@ -103,9 +103,9 @@ sl_value sl_array_get(sl_js_array *arr, sl_vm *vm, sl_value key) {
     }
 
     if (key.tag == SL_TAG_DOUBLE) {
-        zend_long idx = (zend_long)key.u.dval;
-        if ((double)idx == key.u.dval && idx >= 0 && (uint32_t)idx < arr->length) {
-            return sl_value_copy(arr->elements[idx]);
+        double d = key.u.dval; /* compare before casting: NaN/Infinity casts are UB */
+        if (d >= 0 && d < (double)arr->length && d == trunc(d)) {
+            return sl_value_copy(arr->elements[(uint32_t)d]);
         }
     }
 
@@ -439,10 +439,15 @@ void sl_native_free(sl_native_func *f) {
  * JS Date
  * ============================================================ */
 
+/* JS TimeClip: NaN, +-Infinity and anything beyond +-8.64e15 ms is an Invalid Date (NaN). */
+static double sl_time_clip(double ms) {
+    return (isfinite(ms) && fabs(ms) <= 8.64e15) ? ms : NAN;
+}
+
 sl_js_date *sl_date_new(double timestamp) {
     sl_js_date *d = emalloc(sizeof(sl_js_date));
     d->gc.refcount = 1;
-    d->timestamp = timestamp;
+    d->timestamp = sl_time_clip(timestamp);
     return d;
 }
 
@@ -625,10 +630,12 @@ static sl_value sl_num_toPrecision(sl_vm *vm, sl_value *args, int argc) {
         return sl_val_string(sl_to_js_string(args[0]));
     }
 
-    int precision = (int)sl_to_number(args[1]);
-    if (precision < 1 || precision > 21) {
-        return sl_val_string(sl_to_js_string(args[0]));
+    zend_long p = sl_to_integer(args[1]);
+    if (p < 1 || p > 100) {
+        sl_vm_throw_type_error(vm, "RangeError: toPrecision() argument must be between 1 and 100");
+        return sl_val_undefined();
     }
+    int precision = (int)p;
 
     char buf[256];
     int len = snprintf(buf, sizeof(buf), "%.*g", precision, val);
@@ -645,10 +652,13 @@ static sl_value sl_num_toExponential(sl_vm *vm, sl_value *args, int argc) {
 
     int precision = 0;
     if (argc > 1 && args[1].tag != SL_TAG_UNDEFINED) {
-        precision = (int)sl_to_number(args[1]);
+        zend_long p = sl_to_integer(args[1]);
+        if (p < 0 || p > 100) {
+            sl_vm_throw_type_error(vm, "RangeError: toExponential() argument must be between 0 and 100");
+            return sl_val_undefined();
+        }
+        precision = (int)p;
     }
-    if (precision < 0) precision = 0;
-    if (precision > 20) precision = 20;
 
     char buf[256];
     int len = snprintf(buf, sizeof(buf), "%.*e", precision, val);
@@ -743,48 +753,56 @@ static sl_value sl_date_getTime(sl_vm *vm, sl_value *args, int argc) {
 }
 
 static sl_value sl_date_getFullYear(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_year + 1900 : 0);
 }
 
 static sl_value sl_date_getMonth(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_mon : 0);
 }
 
 static sl_value sl_date_getDate(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_mday : 0);
 }
 
 static sl_value sl_date_getDay(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_wday : 0);
 }
 
 static sl_value sl_date_getHours(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_hour : 0);
 }
 
 static sl_value sl_date_getMinutes(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_min : 0);
 }
 
 static sl_value sl_date_getSeconds(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     time_t t = (time_t)(args[0].u.date->timestamp / 1000.0);
     struct tm *gm = gmtime(&t);
     return sl_val_int(gm ? gm->tm_sec : 0);
 }
 
 static sl_value sl_date_getMilliseconds(sl_vm *vm, sl_value *args, int argc) {
+    if (isnan(args[0].u.date->timestamp)) return sl_val_double(NAN);
     double ms = fmod(args[0].u.date->timestamp, 1000.0);
     if (ms < 0) ms += 1000.0;
     return sl_val_int((zend_long)ms);
@@ -792,9 +810,15 @@ static sl_value sl_date_getMilliseconds(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_date_toISOString(sl_vm *vm, sl_value *args, int argc) {
     double ts = args[0].u.date->timestamp;
-    time_t t = (time_t)(ts / 1000.0);
-    struct tm *gm = gmtime(&t);
-    if (!gm) return sl_val_string(zend_string_init("Invalid Date", 12, 0));
+    struct tm *gm = NULL;
+    if (!isnan(ts)) {
+        time_t t = (time_t)(ts / 1000.0);
+        gm = gmtime(&t);
+    }
+    if (!gm) {
+        sl_vm_throw_type_error(vm, "RangeError: Invalid time value");
+        return sl_val_undefined();
+    }
     double abs_ms = fmod(fabs(ts), 1000.0);
     char buf[64];
     int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
@@ -805,6 +829,7 @@ static sl_value sl_date_toISOString(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_date_toString(sl_vm *vm, sl_value *args, int argc) {
     double ts = args[0].u.date->timestamp;
+    if (isnan(ts)) return sl_val_string(zend_string_init("Invalid Date", 12, 0));
     time_t t = (time_t)(ts / 1000.0);
     struct tm *gm = gmtime(&t);
     if (!gm) return sl_val_string(zend_string_init("Invalid Date", 12, 0));
@@ -820,6 +845,7 @@ static sl_value sl_date_toString(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_date_toLocaleDateString(sl_vm *vm, sl_value *args, int argc) {
     double ts = args[0].u.date->timestamp;
+    if (isnan(ts)) return sl_val_string(zend_string_init("Invalid Date", 12, 0));
     time_t t = (time_t)(ts / 1000.0);
     struct tm *gm = gmtime(&t);
     if (!gm) return sl_val_string(zend_string_init("Invalid Date", 12, 0));
@@ -835,7 +861,7 @@ static sl_value sl_date_valueOf(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_date_setTime(sl_vm *vm, sl_value *args, int argc) {
     if (argc > 1) {
-        double new_ts = sl_to_number(args[1]);
+        double new_ts = sl_time_clip(sl_to_number(args[1]));
         args[0].u.date->timestamp = new_ts;
         return sl_val_double(new_ts);
     }
@@ -953,45 +979,105 @@ static sl_value sl_regex_get_property(sl_js_regex *regex, zend_string *key) {
  * ============================================================ */
 
 static sl_value sl_num_toString(sl_vm *vm, sl_value *args, int argc) {
-    int radix = 10;
-    if (argc > 1 && args[1].tag == SL_TAG_INT) radix = (int)args[1].u.ival;
-    else if (argc > 1 && args[1].tag == SL_TAG_DOUBLE) radix = (int)args[1].u.dval;
+    zend_long radix = 10;
+    if (argc > 1 && args[1].tag != SL_TAG_UNDEFINED) {
+        radix = sl_to_integer(args[1]);
+        if (radix < 2 || radix > 36) {
+            sl_vm_throw_type_error(vm, "RangeError: toString() radix must be between 2 and 36");
+            return sl_val_undefined();
+        }
+    }
 
     double val = (args[0].tag == SL_TAG_INT) ? (double)args[0].u.ival : args[0].u.dval;
 
-    if (radix == 10 || radix < 2 || radix > 36) {
+    if (radix == 10 || !isfinite(val)) {
         return sl_val_string(sl_to_js_string(args[0]));
     }
 
-    /* Non-base-10 toString */
-    zend_long ival = (zend_long)val;
-    char buf[128];
+    /* Non-base-10 toString of the integer part (same as the PHP backends) */
+    static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    char buf[1100]; /* 2^1024 in base 2 is 1025 digits */
     int pos = sizeof(buf) - 1;
     buf[pos] = '\0';
-    bool neg = ival < 0;
-    if (neg) ival = -ival;
-    if (ival == 0) { buf[--pos] = '0'; }
-    else {
-        while (ival > 0) {
-            int digit = ival % radix;
-            buf[--pos] = digit < 10 ? '0' + digit : 'a' + digit - 10;
-            ival /= radix;
-        }
+    bool neg;
+    if (args[0].tag == SL_TAG_INT) {
+        zend_long ival = args[0].u.ival;
+        neg = ival < 0;
+        zend_ulong mag = neg ? (zend_ulong)0 - (zend_ulong)ival : (zend_ulong)ival;
+        do {
+            buf[--pos] = digits[mag % (zend_ulong)radix];
+            mag /= (zend_ulong)radix;
+        } while (mag > 0);
+    } else {
+        double fv = trunc(val);
+        neg = fv < 0;
+        fv = fabs(fv);
+        /* fmod is exact for integral doubles; mirrors PHP's base_convert() for large values */
+        do {
+            buf[--pos] = digits[(int)fmod(fv, (double)radix)];
+            fv = floor(fv / (double)radix);
+        } while (pos > 1 && fv >= 1);
     }
-    if (neg) buf[--pos] = '-';
+    if (neg && !(pos == (int)sizeof(buf) - 2 && buf[pos] == '0')) buf[--pos] = '-';
     int len = sizeof(buf) - 1 - pos;
     return sl_val_string(zend_string_init(&buf[pos], len, 0));
 }
 
+/*
+ * JS Number.prototype.toFixed() for finite |x| < 1e21. printf() is exactly rounded but breaks
+ * exact ties to even (12.5 -> "12"); JS picks the larger magnitude (12.5 -> "13", 0.125 -> "0.13").
+ * x is an exact tie at f digits iff x = m * 2^e with odd m and e == -(f + 1).
+ */
+static zend_string *sl_js_to_fixed(double x, int f) {
+    if (x == 0) x = 0.0; /* -0 prints as "0" */
+    bool neg = x < 0;
+    double ax = fabs(x);
+    char buf[192]; /* sign + 21 integer digits + '.' + 101 decimals */
+
+    bool tie = false;
+    if (ax != 0) {
+        int e;
+        double frac = frexp(ax, &e);                 /* ax = frac * 2^e, 0.5 <= frac < 1 */
+        uint64_t m = (uint64_t)ldexp(frac, 53);      /* exact: 53-bit mantissa */
+        int ex = e - 53;
+        while ((m & 1) == 0) { m >>= 1; ex++; }
+        tie = (ex == -(f + 1));
+    }
+
+    if (!tie) {
+        int len = snprintf(buf, sizeof(buf), "%s%.*f", neg ? "-" : "", f, ax);
+        return zend_string_init(buf, len, 0);
+    }
+
+    /* Exact tie: with f+1 decimals the digits are exact and end in '5'; drop it, round up. */
+    char *digits = buf + 2; /* room for a carry digit and the sign */
+    int len = snprintf(digits, sizeof(buf) - 2, "%.*f", f + 1, ax);
+    len -= (f == 0) ? 2 : 1; /* drop the '5' (and the '.' when f == 0) */
+    digits[len] = '\0';
+    int i = len - 1;
+    for (; i >= 0; i--) {
+        if (digits[i] == '.') continue;
+        if (digits[i] == '9') { digits[i] = '0'; continue; }
+        digits[i]++;
+        break;
+    }
+    if (i < 0) { *--digits = '1'; len++; }
+    if (neg) { *--digits = '-'; len++; }
+    return zend_string_init(digits, len, 0);
+}
+
 static sl_value sl_num_toFixed(sl_vm *vm, sl_value *args, int argc) {
     double val = (args[0].tag == SL_TAG_INT) ? (double)args[0].u.ival : args[0].u.dval;
-    int digits = 0;
-    if (argc > 1) digits = (int)sl_to_number(args[1]);
-    if (digits < 0) digits = 0;
-    if (digits > 100) digits = 100;
-    char buf[256];
-    int len = snprintf(buf, sizeof(buf), "%.*f", digits, val);
-    return sl_val_string(zend_string_init(buf, len, 0));
+    zend_long digits = 0;
+    if (argc > 1 && args[1].tag != SL_TAG_UNDEFINED) digits = sl_to_integer(args[1]);
+    if (digits < 0 || digits > 100) {
+        sl_vm_throw_type_error(vm, "RangeError: toFixed() digits argument must be between 0 and 100");
+        return sl_val_undefined();
+    }
+    if (!isfinite(val) || fabs(val) >= 1e21) {
+        return sl_val_string(sl_to_js_string(args[0]));
+    }
+    return sl_val_string(sl_js_to_fixed(val, (int)digits));
 }
 
 static sl_value sl_number_get_property(sl_value num, zend_string *key) {
@@ -1110,14 +1196,14 @@ void sl_set_property(sl_vm *vm, sl_value target, sl_value key, sl_value val) {
             if (key.tag == SL_TAG_INT && key.u.ival >= 0) {
                 sl_array_set(target.u.arr, (uint32_t)key.u.ival, val);
             } else if (key.tag == SL_TAG_DOUBLE) {
-                zend_long idx = (zend_long)key.u.dval;
-                if ((double)idx == key.u.dval && idx >= 0) {
-                    sl_array_set(target.u.arr, (uint32_t)idx, val);
+                double d = key.u.dval;
+                if (d >= 0 && d <= (double)UINT32_MAX && d == trunc(d)) {
+                    sl_array_set(target.u.arr, (uint32_t)d, val);
                 }
             } else if (key.tag == SL_TAG_STRING) {
                 if (zend_string_equals_literal(key.u.str, "length")) {
                     /* Setting length truncates array */
-                    zend_long new_len = (zend_long)sl_to_number(val);
+                    zend_long new_len = sl_to_integer(val);
                     if (new_len >= 0 && (uint32_t)new_len < target.u.arr->length) {
                         for (uint32_t i = (uint32_t)new_len; i < target.u.arr->length; i++) {
                             SL_DELREF(target.u.arr->elements[i]);
@@ -1147,7 +1233,7 @@ void sl_set_property(sl_vm *vm, sl_value target, sl_value key, sl_value val) {
         }
         case SL_TAG_REGEX: {
             if (key.tag == SL_TAG_STRING && zend_string_equals_literal(key.u.str, "lastIndex")) {
-                target.u.regex->last_index = (zend_long)sl_to_number(val);
+                target.u.regex->last_index = sl_to_integer(val);
             }
             break;
         }

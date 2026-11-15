@@ -41,21 +41,21 @@ final class JSFunction implements \ArrayAccess
 
     public function offsetExists(mixed $offset): bool
     {
-        return array_key_exists((string) $offset, $this->properties);
+        return array_key_exists(Ops::toPropertyKey($offset), $this->properties);
     }
 
     public function offsetGet(mixed $offset): mixed
     {
-        return $this->properties[(string) $offset] ?? null;
+        return $this->properties[Ops::toPropertyKey($offset)] ?? null;
     }
 
     public function offsetSet(mixed $offset, mixed $value): void
     {
-        $this->properties[(string) $offset] = $value;
+        $this->properties[Ops::toPropertyKey($offset)] = $value;
     }
 
     public function offsetUnset(mixed $offset): void
     {
-        unset($this->properties[(string) $offset]);
+        unset($this->properties[Ops::toPropertyKey($offset)]);
     }
 }

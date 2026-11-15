@@ -66,7 +66,7 @@ static sl_value sl_arr_splice(sl_vm *vm, sl_value *args, int argc) {
     sl_js_array *arr = args[0].u.arr;
     zend_long len = (zend_long)arr->length;
 
-    zend_long s = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long s = argc > 1 ? sl_to_integer(args[1]) : 0;
     if (s < 0) s = len + s;
     if (s < 0) s = 0;
     if (s > len) s = len;
@@ -75,7 +75,7 @@ static sl_value sl_arr_splice(sl_vm *vm, sl_value *args, int argc) {
     if (argc <= 2 || args[2].tag == SL_TAG_UNDEFINED) {
         dc = len - s;
     } else {
-        dc = (zend_long)sl_to_number(args[2]);
+        dc = sl_to_integer(args[2]);
         if (dc < 0) dc = 0;
         if (dc > len - s) dc = len - s;
     }
@@ -187,13 +187,13 @@ static sl_value sl_arr_fill(sl_vm *vm, sl_value *args, int argc) {
     sl_value val = argc > 1 ? args[1] : sl_val_undefined();
     zend_long len = (zend_long)arr->length;
 
-    zend_long s = argc > 2 ? (zend_long)sl_to_number(args[2]) : 0;
+    zend_long s = argc > 2 ? sl_to_integer(args[2]) : 0;
     if (s < 0) s = len + s;
     if (s < 0) s = 0;
 
     zend_long e;
     if (argc > 3 && args[3].tag != SL_TAG_UNDEFINED) {
-        e = (zend_long)sl_to_number(args[3]);
+        e = sl_to_integer(args[3]);
         if (e < 0) e = len + e;
         if (e < 0) e = 0;
     } else {
@@ -273,14 +273,14 @@ static sl_value sl_arr_slice(sl_vm *vm, sl_value *args, int argc) {
     sl_js_array *arr = args[0].u.arr;
     zend_long len = (zend_long)arr->length;
 
-    zend_long s = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long s = argc > 1 ? sl_to_integer(args[1]) : 0;
     if (s < 0) s = len + s;
     if (s < 0) s = 0;
     if (s > len) s = len;
 
     zend_long e;
     if (argc > 2 && args[2].tag != SL_TAG_UNDEFINED) {
-        e = (zend_long)sl_to_number(args[2]);
+        e = sl_to_integer(args[2]);
         if (e < 0) e = len + e;
         if (e < 0) e = 0;
     } else {
@@ -323,22 +323,41 @@ static sl_value sl_arr_concat(sl_vm *vm, sl_value *args, int argc) {
 }
 
 /* Recursive flat helper */
-static void sl_flatten(sl_js_array *result, sl_value *elements, uint32_t length, int depth) {
+/* flat(Infinity) on a cyclic array (a.push(a)) would recurse forever; JS engines end with a
+ * stack-overflow RangeError, so cap the nesting depth and report the same. */
+#define SL_FLAT_MAX_NESTING 1024
+
+static bool sl_flatten(sl_js_array *result, sl_value *elements, uint32_t length, int depth, int nesting) {
     for (uint32_t i = 0; i < length; i++) {
         if (elements[i].tag == SL_TAG_ARRAY && depth > 0) {
-            sl_flatten(result, elements[i].u.arr->elements, elements[i].u.arr->length, depth - 1);
+            if (nesting >= SL_FLAT_MAX_NESTING) return false;
+            sl_js_array *child = elements[i].u.arr;
+            if (!sl_flatten(result, child->elements, child->length, depth - 1, nesting + 1)) {
+                return false;
+            }
         } else {
             sl_array_push(result, elements[i]);
         }
     }
+    return true;
 }
 
 static sl_value sl_arr_flat(sl_vm *vm, sl_value *args, int argc) {
     sl_js_array *arr = args[0].u.arr;
-    int depth = argc > 1 ? (int)sl_to_number(args[1]) : 1;
+    /* depth: undefined -> 1, else ToIntegerOrInfinity (flat(Infinity) flattens everything) */
+    int depth = 1;
+    if (argc > 1 && args[1].tag != SL_TAG_UNDEFINED) {
+        zend_long d = sl_to_integer(args[1]);
+        depth = d < 0 ? 0 : (d > INT_MAX ? INT_MAX : (int)d);
+    }
 
     sl_js_array *result = sl_array_new(arr->length);
-    sl_flatten(result, arr->elements, arr->length, depth);
+    if (!sl_flatten(result, arr->elements, arr->length, depth, 0)) {
+        sl_value tmp = sl_val_array(result);
+        SL_DELREF(tmp);
+        sl_vm_throw_type_error(vm, "RangeError: Maximum call stack size exceeded");
+        return sl_val_undefined();
+    }
     return sl_val_array(result);
 }
 
@@ -370,7 +389,7 @@ static sl_value sl_arr_flatMap(sl_vm *vm, sl_value *args, int argc) {
 
 static sl_value sl_arr_at(sl_vm *vm, sl_value *args, int argc) {
     sl_js_array *arr = args[0].u.arr;
-    zend_long idx = argc > 1 ? (zend_long)sl_to_number(args[1]) : 0;
+    zend_long idx = argc > 1 ? sl_to_integer(args[1]) : 0;
 
     if (idx < 0) idx += (zend_long)arr->length;
     if (idx < 0 || (uint32_t)idx >= arr->length) return sl_val_undefined();

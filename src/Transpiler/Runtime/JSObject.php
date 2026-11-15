@@ -130,6 +130,10 @@ final class JSObject implements \ArrayAccess, Countable, IteratorAggregate
 
     public function offsetExists(mixed $offset): bool
     {
+        if (!is_string($offset) && !is_int($offset)) {
+            $offset = Ops::toPropertyKey($offset);
+        }
+
         // Fast path: no prototype chain
         if ($this->prototype === null) {
             return array_key_exists($offset, $this->properties);
@@ -147,6 +151,10 @@ final class JSObject implements \ArrayAccess, Countable, IteratorAggregate
 
     public function offsetGet(mixed $offset): mixed
     {
+        if (!is_string($offset) && !is_int($offset)) {
+            $offset = Ops::toPropertyKey($offset);
+        }
+
         // Fast path: no prototype chain (common case for data objects & object literals)
         if ($this->prototype === null) {
             return $this->properties[$offset] ?? null;
@@ -164,12 +172,12 @@ final class JSObject implements \ArrayAccess, Countable, IteratorAggregate
 
     public function offsetSet(mixed $offset, mixed $value): void
     {
-        $this->set((string) $offset, $value);
+        $this->set(Ops::toPropertyKey($offset), $value);
     }
 
     public function offsetUnset(mixed $offset): void
     {
-        $this->delete((string) $offset);
+        $this->delete(Ops::toPropertyKey($offset));
     }
 
     public function count(): int
