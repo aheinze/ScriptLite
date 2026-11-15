@@ -33,7 +33,7 @@ Legacy ScriptLiteNative\\VirtualMachine alias: yes
 Legacy ScriptLiteNative\\CompiledScript alias: yes
 Compiler instantiated: yes
 VM instantiated: yes
-Version: 0.1.0
+Version: 0.1.3
 Engine class: yes
 Legacy ScriptLite\\Engine present: no
 Engine::BACKEND_AUTO: auto
